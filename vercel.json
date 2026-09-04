@@ -5,12 +5,5 @@
   ],
   "routes": [
     { "src": "/(.*)", "dest": "app.py" }
-  ],
-  "env": {
-    "GMAIL_EMAIL": "nkg166465@gmail.com",
-    "GMAIL_APP_PASSWORD": "owjwtlotkfjnsftm",
-    "UPI_ID": "9304619487@fam",
-    "ADMIN_API_KEY": "admin_1234567890",
-    "PAYEE_NAME": "Md Nooralam"
-  }
+  ]
 }

@@ -1,10 +1,7 @@
 """
-UPI Auto-Payment Verifier – Professional Payment Gateway
-- Unique order per request
-- Auto-verify once per order (UTR deduplication)
-- Expiry tracking
-- Success animation (confetti + checkmark)
-- Expired state shown clearly
+UPI Auto-Payment Verifier – Vercel Serverless Edition
+All config from environment with fallback defaults.
+No background threads, on-demand Gmail verification.
 """
 
 import os
@@ -17,23 +14,21 @@ import email
 import sqlite3
 import secrets
 import qrcode
-import threading
 from io import BytesIO
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, send_file, render_template_string
 from flask_cors import CORS
 
 # ============================================
-# CONFIGURATION
+# CONFIGURATION (with fallback defaults)
 # ============================================
 CONFIG = {
     'UPI_ID': os.getenv('UPI_ID', '9304619487@fam'),
     'PAYEE_NAME': os.getenv('PAYEE_NAME', 'Md Nooralam'),
     'GMAIL_APP_PASSWORD': os.getenv('GMAIL_APP_PASSWORD', 'owjwtlotkfjnsftm'),
     'GMAIL_EMAIL': os.getenv('GMAIL_EMAIL', 'nkg166465@gmail.com'),
-    'POLL_INTERVAL': int(os.getenv('POLL_INTERVAL', 1)),
     'TIME_WINDOW_MINUTES': int(os.getenv('TIME_WINDOW_MINUTES', 5)),
-    'DB_FILE': os.getenv('DB_FILE', 'orders.db'),
+    'DB_FILE': os.getenv('DB_FILE', '/tmp/orders.db'),  # Vercel: /tmp writable
     'ADMIN_API_KEY': os.getenv('ADMIN_API_KEY', 'admin_1234567890'),
     'MAX_EMAILS_CHECK': int(os.getenv('MAX_EMAILS_CHECK', 50)),
     'CACHE_EXPIRE_SECONDS': int(os.getenv('CACHE_EXPIRE_SECONDS', 600)),
@@ -52,10 +47,11 @@ app = Flask(__name__)
 CORS(app)
 
 # ============================================
-# DATABASE SETUP
+# DATABASE SETUP (in /tmp for Vercel)
 # ============================================
 def init_db():
-    conn = sqlite3.connect(CONFIG['DB_FILE'])
+    db_path = CONFIG['DB_FILE']
+    conn = sqlite3.connect(db_path)
     c = conn.cursor()
     c.execute('''
         CREATE TABLE IF NOT EXISTS orders (
@@ -93,7 +89,10 @@ def init_db():
     conn.commit()
     conn.close()
 
-init_db()
+try:
+    init_db()
+except Exception as e:
+    logger.error(f"DB init error: {e}")
 
 # ============================================
 # DATABASE HELPERS
@@ -188,200 +187,165 @@ def validate_api_key(api_key):
     return dict(key) if key else None
 
 # ============================================
-# EMAIL MONITOR (background thread)
+# GMAIL VERIFICATION (on-demand)
 # ============================================
-class EmailMonitor:
-    def __init__(self):
-        self.cache = []
-        self.lock = threading.Lock()
-        self.running = True
-        self.thread = threading.Thread(target=self._monitor, daemon=True)
-        self.thread.start()
-        logger.info("Email monitor started.")
+def connect_imap():
+    if not CONFIG['GMAIL_EMAIL'] or not CONFIG['GMAIL_APP_PASSWORD']:
+        raise Exception("Gmail credentials not configured")
+    mail = imaplib.IMAP4_SSL('imap.gmail.com')
+    mail.login(CONFIG['GMAIL_EMAIL'], CONFIG['GMAIL_APP_PASSWORD'])
+    mail.select('INBOX')
+    return mail
 
-    def _monitor(self):
-        while self.running:
-            try:
-                mail = imaplib.IMAP4_SSL('imap.gmail.com')
-                mail.login(CONFIG['GMAIL_EMAIL'], CONFIG['GMAIL_APP_PASSWORD'])
-                mail.select('INBOX')
-                result, data = mail.search(None, 'ALL')
-                if result == 'OK' and data[0]:
-                    ids = data[0].split()
-                    recent_ids = ids[-CONFIG['MAX_EMAILS_CHECK']:]
-                    new_payments = []
-                    for msg_id in recent_ids:
-                        msg_id_str = msg_id.decode() if isinstance(msg_id, bytes) else str(msg_id)
-                        body = self._get_body(mail, msg_id_str)
-                        if body:
-                            details = self._parse(body)
-                            if details.get('type') == 'received' and details.get('utr'):
-                                if details.get('time_diff_minutes') is not None and details['time_diff_minutes'] <= CONFIG['TIME_WINDOW_MINUTES']:
-                                    details['email_id'] = msg_id_str
-                                    with self.lock:
-                                        existing = [p for p in self.cache if p.get('utr') == details.get('utr')]
-                                        if not existing:
-                                            new_payments.append(details)
-                    if new_payments:
-                        with self.lock:
-                            self.cache.extend(new_payments)
-                            self.cache.sort(key=lambda x: x.get('payment_datetime') or '', reverse=True)
-                            now = datetime.now()
-                            self.cache = [p for p in self.cache if p.get('payment_datetime') and (now - datetime.fromisoformat(p['payment_datetime'])).total_seconds() < CONFIG['CACHE_EXPIRE_SECONDS']]
-                mail.close()
-                mail.logout()
-            except Exception as e:
-                logger.error(f"Monitor error: {e}")
-            time.sleep(CONFIG['POLL_INTERVAL'])
-
-    def _get_body(self, mail, msg_id):
-        try:
-            result, data = mail.fetch(msg_id, '(RFC822)')
-            if result != 'OK':
-                return ''
-            raw = data[0][1]
-            msg = email.message_from_bytes(raw)
-            body = ''
-            if msg.is_multipart():
-                for part in msg.walk():
-                    if part.get_content_type() == 'text/plain' and 'attachment' not in str(part.get('Content-Disposition')):
-                        try:
-                            body = part.get_payload(decode=True).decode('utf-8', errors='ignore')
-                            break
-                        except:
-                            continue
-            else:
-                try:
-                    body = msg.get_payload(decode=True).decode('utf-8', errors='ignore')
-                except:
-                    pass
-            return body
-        except:
+def get_email_body(mail, msg_id):
+    try:
+        result, data = mail.fetch(msg_id, '(RFC822)')
+        if result != 'OK':
             return ''
-
-    def _parse(self, body):
-        details = {'amount': None, 'utr': None, 'transaction_id': None, 'sender': None,
-                   'date': None, 'type': None, 'payment_datetime': None, 'time_diff_minutes': None}
-        if 'successfully received' in body.lower():
-            details['type'] = 'received'
-        elif 'successfully paid' in body.lower():
-            details['type'] = 'paid'
-            return details
-        # amount
-        patterns = [r'₹([0-9]+(\.[0-9]+)?)', r'Amount\s*[:]\s*₹([0-9]+(\.[0-9]+)?)']
-        for p in patterns:
-            m = re.search(p, body, re.IGNORECASE)
-            if m:
-                details['amount'] = float(m.group(1))
-                break
-        # UTR
-        utr_patterns = [r'UTR\s*[:]\s*([0-9]+)', r'UTR\s*([0-9]+)']
-        for p in utr_patterns:
-            m = re.search(p, body, re.IGNORECASE)
-            if m:
-                details['utr'] = m.group(1)
-                break
-        # transaction id
-        tx_patterns = [r'Transaction ID\s*[:]\s*([A-Z0-9]+)', r'Txn\s*[:]\s*([A-Z0-9]+)']
-        for p in tx_patterns:
-            m = re.search(p, body, re.IGNORECASE)
-            if m:
-                details['transaction_id'] = m.group(1)
-                break
-        sender_match = re.search(r'from\s*([A-Za-z\s.]+)', body, re.IGNORECASE)
-        if sender_match:
-            details['sender'] = sender_match.group(1).strip()
-        date_match = re.search(r'([0-9]{2}:[0-9]{2}\s*(AM|PM)\s*IST,\s*[0-9]{2}\s*[A-Za-z]+\s*[0-9]{4})', body, re.IGNORECASE)
-        if date_match:
-            details['date'] = date_match.group(1)
+        raw = data[0][1]
+        msg = email.message_from_bytes(raw)
+        body = ''
+        if msg.is_multipart():
+            for part in msg.walk():
+                if part.get_content_type() == 'text/plain' and 'attachment' not in str(part.get('Content-Disposition')):
+                    try:
+                        body = part.get_payload(decode=True).decode('utf-8', errors='ignore')
+                        break
+                    except:
+                        continue
+        else:
             try:
-                time_str = date_match.group(1)
-                time_part = re.search(r'([0-9]{2}:[0-9]{2})\s*(AM|PM)', time_str)
-                if time_part:
-                    hour, minute = map(int, time_part.group(1).split(':'))
-                    ampm = time_part.group(2)
-                    if ampm == 'PM' and hour != 12:
-                        hour += 12
-                    elif ampm == 'AM' and hour == 12:
-                        hour = 0
-                    now = datetime.now()
-                    dt = datetime(now.year, now.month, now.day, hour, minute)
-                    if dt > now:
-                        dt -= timedelta(days=1)
-                    details['payment_datetime'] = dt.isoformat()
-                    details['time_diff_minutes'] = round((now - dt).total_seconds() / 60, 1)
+                body = msg.get_payload(decode=True).decode('utf-8', errors='ignore')
             except:
                 pass
+        return body
+    except:
+        return ''
+
+def parse_payment_email(body):
+    details = {'amount': None, 'utr': None, 'transaction_id': None, 'sender': None,
+               'date': None, 'type': None, 'payment_datetime': None, 'time_diff_minutes': None}
+    if 'successfully received' in body.lower():
+        details['type'] = 'received'
+    elif 'successfully paid' in body.lower():
+        details['type'] = 'paid'
         return details
+    # amount
+    patterns = [r'₹([0-9]+(\.[0-9]+)?)', r'Amount\s*[:]\s*₹([0-9]+(\.[0-9]+)?)']
+    for p in patterns:
+        m = re.search(p, body, re.IGNORECASE)
+        if m:
+            details['amount'] = float(m.group(1))
+            break
+    # UTR
+    utr_patterns = [r'UTR\s*[:]\s*([0-9]+)', r'UTR\s*([0-9]+)']
+    for p in utr_patterns:
+        m = re.search(p, body, re.IGNORECASE)
+        if m:
+            details['utr'] = m.group(1)
+            break
+    # transaction id
+    tx_patterns = [r'Transaction ID\s*[:]\s*([A-Z0-9]+)', r'Txn\s*[:]\s*([A-Z0-9]+)']
+    for p in tx_patterns:
+        m = re.search(p, body, re.IGNORECASE)
+        if m:
+            details['transaction_id'] = m.group(1)
+            break
+    sender_match = re.search(r'from\s*([A-Za-z\s.]+)', body, re.IGNORECASE)
+    if sender_match:
+        details['sender'] = sender_match.group(1).strip()
+    date_match = re.search(r'([0-9]{2}:[0-9]{2}\s*(AM|PM)\s*IST,\s*[0-9]{2}\s*[A-Za-z]+\s*[0-9]{4})', body, re.IGNORECASE)
+    if date_match:
+        details['date'] = date_match.group(1)
+        try:
+            time_str = date_match.group(1)
+            time_part = re.search(r'([0-9]{2}:[0-9]{2})\s*(AM|PM)', time_str)
+            if time_part:
+                hour, minute = map(int, time_part.group(1).split(':'))
+                ampm = time_part.group(2)
+                if ampm == 'PM' and hour != 12:
+                    hour += 12
+                elif ampm == 'AM' and hour == 12:
+                    hour = 0
+                now = datetime.now()
+                dt = datetime(now.year, now.month, now.day, hour, minute)
+                if dt > now:
+                    dt -= timedelta(days=1)
+                details['payment_datetime'] = dt.isoformat()
+                details['time_diff_minutes'] = round((now - dt).total_seconds() / 60, 1)
+        except:
+            pass
+    return details
 
-    def get_recent_payments(self, amount=None, utr=None, time_window=None):
-        time_window = time_window or CONFIG['TIME_WINDOW_MINUTES']
-        now = datetime.now()
-        with self.lock:
-            for p in self.cache:
-                if p.get('payment_datetime'):
-                    dt = datetime.fromisoformat(p['payment_datetime'])
-                    if (now - dt).total_seconds() / 60 > time_window:
-                        continue
-                else:
-                    if p.get('time_diff_minutes') is not None and p['time_diff_minutes'] > time_window:
-                        continue
-                if amount is not None and p.get('amount') and abs(p['amount'] - amount) < 0.01:
-                    if utr is not None:
-                        if p.get('utr') == utr:
-                            return p
-                    else:
-                        return p
-                elif utr is not None and p.get('utr') == utr:
-                    return p
+def search_gmail_payment(amount=None, utr=None, time_window=None):
+    if time_window is None:
+        time_window = CONFIG['TIME_WINDOW_MINUTES']
+    mail = None
+    try:
+        mail = connect_imap()
+        result, data = mail.search(None, 'ALL')
+        if result != 'OK' or not data[0]:
             return None
-
-# ============================================
-# BACKGROUND ORDER PROCESSOR (auto-verify)
-# ============================================
-class OrderProcessor:
-    def __init__(self, monitor):
-        self.monitor = monitor
-        self.running = True
-        self.thread = threading.Thread(target=self._process, daemon=True)
-        self.thread.start()
-
-    def _process(self):
-        while self.running:
+        ids = data[0].split()
+        recent_ids = ids[-CONFIG['MAX_EMAILS_CHECK']:]
+        now = datetime.now()
+        for msg_id in recent_ids:
+            msg_id_str = msg_id.decode() if isinstance(msg_id, bytes) else str(msg_id)
+            body = get_email_body(mail, msg_id_str)
+            if not body:
+                continue
+            details = parse_payment_email(body)
+            if details.get('type') != 'received':
+                continue
+            if details.get('payment_datetime'):
+                dt = datetime.fromisoformat(details['payment_datetime'])
+                if (now - dt).total_seconds() / 60 > time_window:
+                    continue
+            elif details.get('time_diff_minutes') is not None and details['time_diff_minutes'] > time_window:
+                continue
+            else:
+                result2, data2 = mail.fetch(msg_id, '(BODY.PEEK[HEADER.FIELDS (DATE)])')
+                if result2 == 'OK':
+                    header = data2[0][1].decode('utf-8', errors='ignore')
+                    date_match = re.search(r'Date:\s*(.+)', header, re.IGNORECASE)
+                    if date_match:
+                        try:
+                            email_date = email.utils.parsedate_to_datetime(date_match.group(1))
+                            diff = (datetime.now(email_date.tzinfo) - email_date).total_seconds() / 60 if email_date.tzinfo else (datetime.now() - email_date).total_seconds() / 60
+                            if diff > time_window:
+                                continue
+                        except:
+                            pass
+            if amount is not None and details.get('amount') and abs(details['amount'] - amount) < 0.01:
+                if utr is not None:
+                    if details.get('utr') == utr:
+                        return details
+                else:
+                    return details
+            elif utr is not None and details.get('utr') == utr:
+                return details
+        return None
+    except Exception as e:
+        logger.error(f"Gmail search error: {e}")
+        return None
+    finally:
+        if mail:
             try:
-                pending = get_pending_orders()
-                for order in pending:
-                    if order['status'] != 'pending':
-                        continue
-                    payment = self.monitor.get_recent_payments(amount=order['amount'])
-                    if payment:
-                        utr = payment.get('utr')
-                        if utr and not is_utr_verified(utr):
-                            update_order(order['order_id'],
-                                         status='verified',
-                                         utr=utr,
-                                         transaction_id=payment.get('transaction_id'),
-                                         sender_name=payment.get('sender'),
-                                         payment_time=payment.get('date'))
-                            mark_utr_verified(utr, order['order_id'])
-                            logger.info(f"Order {order['order_id']} auto-verified")
-            except Exception as e:
-                logger.error(f"Processor error: {e}")
-            time.sleep(2)
+                mail.close()
+                mail.logout()
+            except:
+                pass
 
 # ============================================
-# START BACKGROUND SERVICES
-# ============================================
-email_monitor = EmailMonitor()
-order_processor = OrderProcessor(email_monitor)
-
-# ============================================
-# ADMIN ROUTES (via query parameters)
+# ADMIN ROUTES (protected by admin_key)
 # ============================================
 ADMIN_KEY = CONFIG['ADMIN_API_KEY']
 
 def admin_required():
     provided = request.args.get('admin_key')
+    auth_header = request.headers.get('Authorization')
+    if auth_header and auth_header.startswith('Bearer '):
+        provided = auth_header.split(' ')[1]
     return provided == ADMIN_KEY
 
 @app.route('/apikey_generate', methods=['GET'])
@@ -514,25 +478,24 @@ def api_verify_order():
     if not order:
         return jsonify({'status': 'error', 'message': 'Order not found'}), 404
     
-    # If order is pending, try auto-verify
+    # Check expiry first
+    now = datetime.now()
+    expires = datetime.strptime(order['expires_at'], '%d-%m-%Y %H:%M:%S')
+    if now > expires and order['status'] == 'pending':
+        update_order(order_id, status='expired')
+        order = get_order(order_id)
+    
     if order['status'] == 'pending':
-        # Check expiry
-        now = datetime.now()
-        expires = datetime.strptime(order['expires_at'], '%d-%m-%Y %H:%M:%S')
-        if now > expires:
-            update_order(order_id, status='expired')
-            order = get_order(order_id)
-        else:
-            payment = email_monitor.get_recent_payments(amount=order['amount'])
-            if payment:
-                utr = payment.get('utr')
-                if utr and not is_utr_verified(utr):
-                    update_order(order_id, status='verified', utr=utr,
-                                 transaction_id=payment.get('transaction_id'),
-                                 sender_name=payment.get('sender'),
-                                 payment_time=payment.get('date'))
-                    mark_utr_verified(utr, order_id)
-                    order = get_order(order_id)
+        payment = search_gmail_payment(amount=order['amount'])
+        if payment:
+            utr = payment.get('utr')
+            if utr and not is_utr_verified(utr):
+                update_order(order_id, status='verified', utr=utr,
+                             transaction_id=payment.get('transaction_id'),
+                             sender_name=payment.get('sender'),
+                             payment_time=payment.get('date'))
+                mark_utr_verified(utr, order_id)
+                order = get_order(order_id)
     
     return jsonify({
         'status': 'success',
@@ -567,7 +530,7 @@ def qr_image():
     return send_file(img_io, mimetype='image/png')
 
 # ============================================
-# PAYMENT PAGE – Enhanced with Expiry & Animation
+# PAYMENT PAGE (with auto-check)
 # ============================================
 @app.route('/pay.php', methods=['GET'])
 def pay_page():
@@ -586,7 +549,6 @@ def pay_page():
     merchant = CONFIG['PAYEE_NAME']
     status = order['status']
 
-    # If already verified, show success page with animation
     if status == 'verified':
         return render_template_string(SUCCESS_PAGE, 
             order_id=order_id, 
@@ -597,11 +559,9 @@ def pay_page():
             sender=order.get('sender_name', '')
         )
 
-    # If expired, show expired page
     now = datetime.now()
     expires_dt = datetime.strptime(expires_at, '%d-%m-%Y %H:%M:%S')
     if now > expires_dt:
-        # Update status to expired if still pending
         if order['status'] == 'pending':
             update_order(order_id, status='expired')
         return render_template_string(EXPIRED_PAGE,
@@ -611,20 +571,17 @@ def pay_page():
             expires_at=expires_at
         )
 
-    # Pending – show payment page with auto-check
-    html = PAYMENT_PAGE_TEMPLATE.format(
+    return render_template_string(PAYMENT_PAGE_TEMPLATE,
         amount=amount,
         qr_url=qr_url,
         order_id=order_id,
         merchant=merchant,
         expires_at=expires_at,
-        verify_url=verify_url,
-        base_url=base_url
+        verify_url=verify_url
     )
-    return html
 
 # ============================================
-# HTML TEMPLATES (for success/expired)
+# HTML TEMPLATES
 # ============================================
 SUCCESS_PAGE = '''
 <!DOCTYPE html>
@@ -637,51 +594,73 @@ SUCCESS_PAGE = '''
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #f0f4f8;
+            background: #0a0a1a;
             display: flex;
             justify-content: center;
             align-items: center;
             min-height: 100vh;
-            margin: 0;
             overflow: hidden;
+            margin: 0;
+        }
+        .glow-bg {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: radial-gradient(circle at center, #1a0533 0%, #0a0a1a 100%);
+            z-index: 0;
+        }
+        .glow-ring {
+            position: absolute;
+            border-radius: 50%;
+            filter: blur(60px);
+            animation: glowPulse 2s ease-in-out infinite alternate;
+        }
+        .ring1 { width: 400px; height: 400px; top: 10%; left: 20%; background: #8b5cf6; opacity: 0.15; }
+        .ring2 { width: 500px; height: 500px; bottom: 10%; right: 15%; background: #ec4899; opacity: 0.12; }
+        .ring3 { width: 300px; height: 300px; top: 50%; left: 60%; background: #06b6d4; opacity: 0.10; }
+        @keyframes glowPulse {
+            0% { transform: scale(1); opacity: 0.5; }
+            100% { transform: scale(1.5); opacity: 0.8; }
         }
         .success-container {
-            background: white;
+            position: relative;
+            z-index: 2;
+            background: rgba(255,255,255,0.05);
+            backdrop-filter: blur(20px);
             border-radius: 32px;
             padding: 50px 40px;
             max-width: 460px;
             width: 100%;
             text-align: center;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.08);
-            position: relative;
-            z-index: 2;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+            border: 1px solid rgba(255,255,255,0.08);
             animation: popIn 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
         }
         @keyframes popIn {
-            0% { transform: scale(0.8); opacity: 0; }
-            100% { transform: scale(1); opacity: 1; }
+            0% { transform: scale(0.8) rotate(-5deg); opacity: 0; }
+            100% { transform: scale(1) rotate(0); opacity: 1; }
         }
         .checkmark {
-            width: 80px;
-            height: 80px;
-            background: #10b981;
+            width: 100px;
+            height: 100px;
+            background: linear-gradient(135deg, #34d399, #10b981);
             border-radius: 50%;
             display: flex;
             align-items: center;
             justify-content: center;
             margin: 0 auto 20px;
+            box-shadow: 0 0 40px rgba(52, 211, 153, 0.4);
             animation: bounceIn 0.8s ease;
         }
         .checkmark svg {
-            width: 50px;
-            height: 50px;
+            width: 60px;
+            height: 60px;
             fill: none;
             stroke: white;
             stroke-width: 4;
             stroke-linecap: round;
             stroke-linejoin: round;
-            stroke-dasharray: 50;
-            stroke-dashoffset: 50;
+            stroke-dasharray: 60;
+            stroke-dashoffset: 60;
             animation: drawCheck 0.5s ease forwards 0.3s;
         }
         @keyframes bounceIn {
@@ -693,69 +672,64 @@ SUCCESS_PAGE = '''
         @keyframes drawCheck {
             100% { stroke-dashoffset: 0; }
         }
-        h1 {
-            font-size: 28px;
-            color: #1a202c;
-            margin: 10px 0 6px;
-        }
-        .sub {
-            color: #4a5568;
-            font-size: 16px;
-            margin-bottom: 24px;
-        }
+        h1 { font-size: 28px; color: #fff; margin: 10px 0 6px; font-weight: 600; }
+        .sub { color: #94a3b8; font-size: 16px; margin-bottom: 24px; }
         .detail-box {
-            background: #f7fafc;
+            background: rgba(255,255,255,0.06);
             border-radius: 16px;
             padding: 20px;
             text-align: left;
             margin: 20px 0;
+            border: 1px solid rgba(255,255,255,0.06);
         }
         .detail-row {
             display: flex;
             justify-content: space-between;
             padding: 8px 0;
             font-size: 15px;
-            border-bottom: 1px solid #edf2f7;
+            border-bottom: 1px solid rgba(255,255,255,0.06);
         }
         .detail-row:last-child { border: none; }
-        .detail-row .label { color: #718096; }
-        .detail-row .value { font-weight: 500; color: #2d3748; }
+        .detail-row .label { color: #94a3b8; }
+        .detail-row .value { font-weight: 500; color: #e2e8f0; }
         .btn {
             display: inline-block;
-            background: #4a6cf7;
+            background: linear-gradient(135deg, #8b5cf6, #6366f1);
             color: white;
-            padding: 12px 30px;
+            padding: 12px 32px;
             border-radius: 40px;
             text-decoration: none;
             font-weight: 500;
-            transition: background 0.2s;
-            margin-top: 12px;
+            transition: transform 0.2s, box-shadow 0.2s;
+            box-shadow: 0 4px 20px rgba(99,102,241,0.3);
         }
-        .btn:hover { background: #3b5de7; }
+        .btn:hover { transform: scale(1.03); box-shadow: 0 6px 30px rgba(99,102,241,0.5); }
         .confetti-container {
             position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
             pointer-events: none;
             z-index: 1;
             overflow: hidden;
         }
         .confetti {
             position: absolute;
-            width: 10px;
-            height: 10px;
+            width: 10px; height: 10px;
             opacity: 0.9;
             animation: confettiFall linear forwards;
         }
         @keyframes confettiFall {
             0% { transform: translateY(-10px) rotate(0deg); opacity: 1; }
-            100% { transform: translateY(100vh) rotate(720deg); opacity: 0; }
+            100% { transform: translateY(110vh) rotate(720deg); opacity: 0; }
         }
     </style>
 </head>
 <body>
+    <div class="glow-bg">
+        <div class="glow-ring ring1"></div>
+        <div class="glow-ring ring2"></div>
+        <div class="glow-ring ring3"></div>
+    </div>
     <div class="confetti-container" id="confetti"></div>
     <div class="success-container">
         <div class="checkmark">
@@ -773,20 +747,19 @@ SUCCESS_PAGE = '''
         <a href="/" class="btn">Done</a>
     </div>
     <script>
-        // Confetti
         (function() {
             const container = document.getElementById('confetti');
-            const colors = ['#ff6b6b', '#fbbf24', '#34d399', '#60a5fa', '#a78bfa', '#f472b6', '#fb923c'];
-            for (let i = 0; i < 80; i++) {
+            const colors = ['#ff6b6b', '#fbbf24', '#34d399', '#60a5fa', '#a78bfa', '#f472b6', '#fb923c', '#22d3ee'];
+            for (let i = 0; i < 100; i++) {
                 const el = document.createElement('div');
                 el.className = 'confetti';
                 el.style.left = Math.random() * 100 + '%';
-                el.style.width = (Math.random() * 8 + 4) + 'px';
-                el.style.height = (Math.random() * 8 + 4) + 'px';
+                el.style.width = (Math.random() * 10 + 5) + 'px';
+                el.style.height = (Math.random() * 10 + 5) + 'px';
                 el.style.background = colors[Math.floor(Math.random() * colors.length)];
                 el.style.borderRadius = Math.random() > 0.5 ? '50%' : '2px';
-                el.style.animationDuration = (Math.random() * 2 + 1.5) + 's';
-                el.style.animationDelay = (Math.random() * 1.5) + 's';
+                el.style.animationDuration = (Math.random() * 2.5 + 1.5) + 's';
+                el.style.animationDelay = (Math.random() * 2) + 's';
                 container.appendChild(el);
             }
         })();
@@ -806,39 +779,41 @@ EXPIRED_PAGE = '''
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #f0f4f8;
+            background: #0a0a1a;
             display: flex;
             justify-content: center;
             align-items: center;
             min-height: 100vh;
         }
         .card {
-            background: white;
+            background: rgba(255,255,255,0.05);
+            backdrop-filter: blur(20px);
             border-radius: 32px;
             padding: 50px 40px;
             max-width: 420px;
             width: 100%;
             text-align: center;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.08);
+            box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+            border: 1px solid rgba(255,255,255,0.08);
         }
         .icon { font-size: 64px; margin-bottom: 16px; }
-        h1 { color: #e53e3e; font-size: 26px; margin-bottom: 8px; }
-        .sub { color: #4a5568; font-size: 16px; margin-bottom: 20px; }
-        .detail { background: #f7fafc; border-radius: 12px; padding: 16px; margin: 16px 0; }
-        .detail .row { display: flex; justify-content: space-between; padding: 6px 0; font-size: 15px; }
-        .row .label { color: #718096; }
+        h1 { color: #f87171; font-size: 26px; margin-bottom: 8px; }
+        .sub { color: #94a3b8; font-size: 16px; margin-bottom: 20px; }
+        .detail { background: rgba(255,255,255,0.06); border-radius: 12px; padding: 16px; margin: 16px 0; border: 1px solid rgba(255,255,255,0.06); }
+        .detail .row { display: flex; justify-content: space-between; padding: 6px 0; font-size: 15px; color: #e2e8f0; }
+        .row .label { color: #94a3b8; }
         .row .value { font-weight: 500; }
         .btn {
             display: inline-block;
-            background: #4a6cf7;
+            background: linear-gradient(135deg, #8b5cf6, #6366f1);
             color: white;
-            padding: 12px 30px;
+            padding: 12px 32px;
             border-radius: 40px;
             text-decoration: none;
             font-weight: 500;
-            transition: background 0.2s;
+            transition: transform 0.2s;
         }
-        .btn:hover { background: #3b5de7; }
+        .btn:hover { transform: scale(1.03); }
     </style>
 </head>
 <body>
@@ -868,7 +843,7 @@ PAYMENT_PAGE_TEMPLATE = '''
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         body {{
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #f5f7fa;
+            background: #0a0a1a;
             display: flex;
             justify-content: center;
             align-items: center;
@@ -876,35 +851,37 @@ PAYMENT_PAGE_TEMPLATE = '''
             padding: 20px;
         }}
         .card {{
-            background: white;
-            border-radius: 20px;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.08);
+            background: rgba(255,255,255,0.05);
+            backdrop-filter: blur(20px);
+            border-radius: 24px;
             padding: 30px;
             max-width: 420px;
             width: 100%;
-            transition: 0.3s;
+            border: 1px solid rgba(255,255,255,0.08);
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
         }}
         .header {{ text-align: center; margin-bottom: 24px; }}
-        .header .brand {{ font-size: 20px; font-weight: 700; color: #1a1a2e; letter-spacing: -0.5px; }}
-        .header .brand span {{ color: #4a6cf7; }}
+        .header .brand {{ font-size: 20px; font-weight: 700; color: #f1f5f9; letter-spacing: -0.5px; }}
+        .header .brand span {{ color: #8b5cf6; }}
         .order-total {{
-            background: #f0f3ff;
+            background: rgba(139,92,246,0.12);
             border-radius: 16px;
             padding: 20px;
             text-align: center;
             margin-bottom: 24px;
+            border: 1px solid rgba(139,92,246,0.15);
         }}
-        .order-total .label {{ font-size: 14px; color: #6b7a8f; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }}
-        .order-total .amount {{ font-size: 36px; font-weight: 700; color: #1a1a2e; margin-top: 4px; }}
-        .order-total .currency {{ font-size: 20px; color: #6b7a8f; }}
+        .order-total .label {{ font-size: 14px; color: #94a3b8; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }}
+        .order-total .amount {{ font-size: 36px; font-weight: 700; color: #e2e8f0; margin-top: 4px; }}
+        .order-total .currency {{ font-size: 20px; color: #94a3b8; }}
         .qr-section {{ text-align: center; margin: 20px 0 16px; }}
-        .qr-section img {{ width: 200px; height: 200px; border: 2px solid #eef2f7; border-radius: 16px; padding: 8px; background: white; }}
-        .qr-section .sub {{ font-size: 14px; color: #6b7a8f; margin-top: 8px; }}
+        .qr-section img {{ width: 200px; height: 200px; border: 2px solid rgba(255,255,255,0.1); border-radius: 16px; padding: 8px; background: white; }}
+        .qr-section .sub {{ font-size: 14px; color: #94a3b8; margin-top: 8px; }}
         .qr-section .save-btn {{
             display: inline-block;
             margin-top: 10px;
-            background: #eef2f7;
-            color: #1a1a2e;
+            background: rgba(255,255,255,0.08);
+            color: #e2e8f0;
             padding: 8px 18px;
             border-radius: 30px;
             font-size: 14px;
@@ -912,44 +889,45 @@ PAYMENT_PAGE_TEMPLATE = '''
             text-decoration: none;
             transition: 0.2s;
         }}
-        .qr-section .save-btn:hover {{ background: #dce2ec; }}
-        .details {{ margin: 20px 0; border-top: 1px solid #eef2f7; padding-top: 20px; }}
+        .qr-section .save-btn:hover {{ background: rgba(255,255,255,0.15); }}
+        .details {{ margin: 20px 0; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 20px; }}
         .detail-row {{ display: flex; justify-content: space-between; padding: 8px 0; font-size: 15px; }}
-        .detail-row .label {{ color: #6b7a8f; }}
-        .detail-row .value {{ font-weight: 500; color: #1a1a2e; }}
+        .detail-row .label {{ color: #94a3b8; }}
+        .detail-row .value {{ font-weight: 500; color: #e2e8f0; }}
         .status {{
-            background: #f8f9fc;
+            background: rgba(255,255,255,0.05);
             border-radius: 12px;
             padding: 16px;
             text-align: center;
             margin: 16px 0;
             font-size: 15px;
-            color: #4a6cf7;
+            color: #8b5cf6;
             font-weight: 500;
             display: flex;
             align-items: center;
             justify-content: center;
             gap: 8px;
+            border: 1px solid rgba(139,92,246,0.15);
         }}
         .status .spinner {{
             display: inline-block;
             width: 18px;
             height: 18px;
-            border: 3px solid #eef2f7;
-            border-top: 3px solid #4a6cf7;
+            border: 3px solid rgba(139,92,246,0.2);
+            border-top: 3px solid #8b5cf6;
             border-radius: 50%;
             animation: spin 0.8s linear infinite;
         }}
         @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
-        .status.verified {{ background: #e3f5e9; color: #0d7c3f; }}
+        .status.verified {{ background: rgba(52,211,153,0.12); color: #34d399; border-color: rgba(52,211,153,0.2); }}
         .status.verified .spinner {{ display: none; }}
-        .status.expired {{ background: #fee2e2; color: #dc2626; }}
+        .status.expired {{ background: rgba(248,113,113,0.12); color: #f87171; border-color: rgba(248,113,113,0.2); }}
         .status.expired .spinner {{ display: none; }}
         .check-link {{ text-align: center; margin-top: 12px; font-size: 14px; }}
-        .check-link a {{ color: #4a6cf7; text-decoration: none; font-weight: 500; }}
+        .check-link a {{ color: #8b5cf6; text-decoration: none; font-weight: 500; }}
         .check-link a:hover {{ text-decoration: underline; }}
-        .footer {{ text-align: center; margin-top: 20px; font-size: 13px; color: #a0b0c0; }}
-        .timer-warning {{ color: #e53e3e; font-weight: 600; }}
+        .footer {{ text-align: center; margin-top: 20px; font-size: 13px; color: #64748b; }}
+        .timer-warning {{ color: #f87171; font-weight: 600; }}
     </style>
 </head>
 <body>
@@ -980,7 +958,6 @@ PAYMENT_PAGE_TEMPLATE = '''
         <div class="footer">⚡ Auto‑verified instantly after UPI payment</div>
     </div>
     <script>
-        // Expiry timer
         const expiresStr = "{expires_at}";
         const [datePart, timePart] = expiresStr.split(' ');
         const [dd, mm, yyyy] = datePart.split('-');
@@ -1005,7 +982,6 @@ PAYMENT_PAGE_TEMPLATE = '''
         updateTimer();
         setInterval(updateTimer, 1000);
 
-        // Auto-check status every 3 seconds
         const statusEl = document.getElementById('status');
         const statusText = document.getElementById('status-text');
         const verifyUrl = "{verify_url}";
@@ -1017,12 +993,10 @@ PAYMENT_PAGE_TEMPLATE = '''
                     if (data.data && data.data.status === 'verified') {{
                         statusEl.className = 'status verified';
                         statusText.textContent = '✅ Payment Verified!';
-                        // Reload to show success page with animation
                         setTimeout(() => location.reload(), 1500);
                     }} else if (data.data && data.data.status === 'expired') {{
                         statusEl.className = 'status expired';
                         statusText.textContent = '⏰ Order expired';
-                        // Reload to show expired page
                         setTimeout(() => location.reload(), 1000);
                     }}
                 }})
@@ -1036,7 +1010,7 @@ PAYMENT_PAGE_TEMPLATE = '''
 '''
 
 # ============================================
-# OTHER ENDPOINTS (verify-fast, debug, health)
+# VERIFICATION ENDPOINTS (fast)
 # ============================================
 @app.route('/verify-fast', methods=['GET'])
 def verify_fast():
@@ -1051,7 +1025,7 @@ def verify_fast():
         time_window = int(time_window)
     except:
         return jsonify({'status': 'error', 'message': 'Invalid input'}), 400
-    payment = email_monitor.get_recent_payments(amount=amount, utr=utr, time_window=time_window)
+    payment = search_gmail_payment(amount=amount, utr=utr, time_window=time_window)
     if payment:
         return jsonify({'status': 'success', 'message': '✅ Payment found!', 'data': payment})
     else:
@@ -1072,7 +1046,7 @@ def verify_by_utr():
         time_window = int(time_window)
     except:
         return jsonify({'status': 'error', 'message': 'Invalid time_window'}), 400
-    payment = email_monitor.get_recent_payments(utr=utr, time_window=time_window)
+    payment = search_gmail_payment(utr=utr, time_window=time_window)
     if payment:
         return jsonify({'status': 'success', 'message': '✅ Payment found by UTR', 'data': payment})
     else:
@@ -1089,7 +1063,7 @@ def verify_last_payment():
         time_window = int(time_window)
     except:
         return jsonify({'status': 'error', 'message': 'Invalid input'}), 400
-    payment = email_monitor.get_recent_payments(amount=amount, time_window=time_window)
+    payment = search_gmail_payment(amount=amount, time_window=time_window)
     if payment:
         return jsonify({'status': 'success', 'message': '✅ Payment found', 'data': payment})
     else:
@@ -1111,7 +1085,7 @@ def verify_payment_legacy():
         time_window = int(time_window)
     except:
         return jsonify({'status': 'error', 'message': 'Invalid input'}), 400
-    payment = email_monitor.get_recent_payments(amount=amount, time_window=time_window)
+    payment = search_gmail_payment(amount=amount, time_window=time_window)
     if payment:
         return jsonify({'status': 'success', 'message': '✅ Payment verified', 'data': payment})
     else:
@@ -1138,23 +1112,23 @@ def generate_qr_legacy():
 
 @app.route('/debug-emails', methods=['GET'])
 def debug_emails():
-    with email_monitor.lock:
-        cache_copy = email_monitor.cache[:]
-    return jsonify({'status': 'success', 'cached_payments': cache_copy, 'cache_size': len(cache_copy)})
+    payment = search_gmail_payment()
+    return jsonify({'status': 'debug', 'last_payment': payment})
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat(), 'cache_size': len(email_monitor.cache)})
+    return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
 
+# ============================================
+# ROOT – Public documentation (no admin key exposed)
+# ============================================
 @app.route('/', methods=['GET'])
 def index():
     base_url = request.url_root.rstrip('/')
-    admin_key = CONFIG['ADMIN_API_KEY']
     return jsonify({
         'name': 'UPI Auto-Payment Verifier',
-        'version': '4.0.0',
-        'description': 'Complete payment verification system with admin panel via query parameters.',
-        'admin_key': admin_key,
+        'version': '4.1.0',
+        'description': 'Payment verification system with auto-verify, expiry, and glow UI.',
         'endpoints': {
             'public': {
                 '/': 'GET - This documentation',
@@ -1168,31 +1142,22 @@ def index():
                 '/api/verify-order.php': 'GET - Check order status (api_key, order_id)',
                 '/api/qr-image.php': 'GET - Get QR image (order_id)',
                 '/pay.php': 'GET - Payment page (order_id)',
-                '/debug-emails': 'GET - View cached payments'
-            },
-            'admin': {
-                '/apikey_generate': 'GET - Generate merchant API key (admin_key, name, hours or days)',
-                '/admin_orders': 'GET - List orders (admin_key)',
-                '/admin_keys': 'GET - List all API keys (admin_key)',
-                '/admin_revoke': 'GET - Revoke an API key (admin_key, api_key)',
-                '/admin_verify': 'GET - Manually verify order (admin_key, order_id, utr)'
+                '/debug-emails': 'GET - Debug (last payment)'
             }
         },
         'examples': {
-            'generate_key': f'curl "{base_url}/apikey_generate?admin_key={admin_key}&name=MyStore&hours=48"',
-            'list_orders': f'curl "{base_url}/admin_orders?admin_key={admin_key}"',
-            'list_keys': f'curl "{base_url}/admin_keys?admin_key={admin_key}"',
-            'revoke_key': f'curl "{base_url}/admin_revoke?admin_key={admin_key}&api_key=fam_abc123..."',
-            'manual_verify': f'curl "{base_url}/admin_verify?admin_key={admin_key}&order_id=fg_PEQ1JTMI&utr=006175980105"',
             'create_order': f'curl "{base_url}/api/qr.php?api_key=fam_YOUR_KEY&amount=499"',
             'verify_by_amount': f'curl "{base_url}/verify-fast?amount=1"',
             'verify_by_utr': f'curl "{base_url}/verify-fast?utr=006175980105"',
             'check_order': f'curl "{base_url}/api/verify-order.php?api_key=fam_YOUR_KEY&order_id=fg_PEQ1JTMI"',
             'generate_qr_image': f'curl "{base_url}/generate-qr?amount=499" --output qr.png',
             'payment_page': f'Open in browser: {base_url}/pay.php?order_id=fg_PEQ1JTMI',
-            'debug': f'curl {base_url}/debug-emails',
+            'health': f'curl {base_url}/health'
         }
     })
 
+# ============================================
+# VERCEL ENTRY POINT
+# ============================================
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
+    app.run(host='0.0.0.0', port=5000, debug=False)
