@@ -1,8 +1,6 @@
 """
-UPI Auto-Payment Verifier – Vercel Serverless Edition
-All config from environment with fallback defaults.
-No background threads, on-demand Gmail verification.
-Order ID prefix: Khan_
+UPI Auto-Payment Verifier – Vercel + Supabase Edition
+Colorful UI, glow animations, colored QR codes, all in one file.
 """
 
 import os
@@ -12,7 +10,6 @@ import json
 import logging
 import imaplib
 import email
-import sqlite3
 import secrets
 import qrcode
 from io import BytesIO
@@ -20,8 +17,16 @@ from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, send_file, render_template_string
 from flask_cors import CORS
 
+# Optional Supabase import (if installed)
+try:
+    from supabase import create_client
+    SUPABASE_AVAILABLE = True
+except ImportError:
+    SUPABASE_AVAILABLE = False
+    create_client = None
+
 # ============================================
-# CONFIGURATION (with fallback defaults)
+# CONFIGURATION
 # ============================================
 CONFIG = {
     'UPI_ID': os.getenv('UPI_ID', '9304619487@fam'),
@@ -29,10 +34,10 @@ CONFIG = {
     'GMAIL_APP_PASSWORD': os.getenv('GMAIL_APP_PASSWORD', 'owjwtlotkfjnsftm'),
     'GMAIL_EMAIL': os.getenv('GMAIL_EMAIL', 'nkg166465@gmail.com'),
     'TIME_WINDOW_MINUTES': int(os.getenv('TIME_WINDOW_MINUTES', 5)),
-    'DB_FILE': os.getenv('DB_FILE', '/tmp/orders.db'),
     'ADMIN_API_KEY': os.getenv('ADMIN_API_KEY', 'khanbro786'),
     'MAX_EMAILS_CHECK': int(os.getenv('MAX_EMAILS_CHECK', 50)),
-    'CACHE_EXPIRE_SECONDS': int(os.getenv('CACHE_EXPIRE_SECONDS', 600)),
+    'SUPABASE_URL': os.getenv('SUPABASE_URL'),
+    'SUPABASE_KEY': os.getenv('SUPABASE_KEY'),
 }
 
 # ============================================
@@ -48,159 +53,181 @@ app = Flask(__name__)
 CORS(app)
 
 # ============================================
-# DATABASE SETUP (in /tmp for Vercel)
+# DATABASE SETUP (Supabase or Fallback)
 # ============================================
-def get_db():
-    db_path = CONFIG['DB_FILE']
-    db_dir = os.path.dirname(db_path)
-    if db_dir and not os.path.exists(db_dir):
-        os.makedirs(db_dir, exist_ok=True)
-    
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            conn = sqlite3.connect(db_path, timeout=10)
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
-            return conn
-        except sqlite3.OperationalError as e:
-            if attempt == max_retries - 1:
-                raise e
-            time.sleep(0.5)
+if CONFIG['SUPABASE_URL'] and CONFIG['SUPABASE_KEY'] and SUPABASE_AVAILABLE:
+    supabase_client = create_client(CONFIG['SUPABASE_URL'], CONFIG['SUPABASE_KEY'])
+    logger.info("Supabase client initialized.")
+else:
+    supabase_client = None
+    logger.warning("Supabase not configured. Using in-memory fallback (data lost on restart).")
 
-def init_db():
-    try:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS orders (
-                order_id TEXT PRIMARY KEY,
-                api_key TEXT,
-                amount REAL,
-                payable_amount REAL,
-                status TEXT DEFAULT 'pending',
-                utr TEXT,
-                transaction_id TEXT,
-                sender_name TEXT,
-                payment_time TEXT,
-                created_at TEXT,
-                expires_at TEXT,
-                verified_at TEXT,
-                attempts INTEGER DEFAULT 0
-            )
-        ''')
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS api_keys (
-                api_key TEXT PRIMARY KEY,
-                name TEXT,
-                created_at TEXT,
-                expires_at TEXT,
-                is_active INTEGER DEFAULT 1
-            )
-        ''')
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS verified_utrs (
-                utr TEXT PRIMARY KEY,
-                order_id TEXT,
-                verified_at TEXT
-            )
-        ''')
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.error(f"DB init error: {e}")
+# Fallback storage (in-memory)
+app.fallback_orders = {}
+app.fallback_api_keys = {}
+app.fallback_utrs = {}
 
-try:
-    init_db()
-except Exception as e:
-    logger.error(f"DB init error: {e}")
-
-# ============================================
-# DATABASE HELPERS
-# ============================================
-def create_order(api_key, amount):
-    order_id = f"Khan_{secrets.token_hex(4).upper()}"  # Changed prefix
+def db_create_order(api_key, amount):
+    order_id = f"Khan_{secrets.token_hex(4).upper()}"
     now = datetime.now().strftime('%d-%m-%Y %H:%M:%S')
     expires = (datetime.now() + timedelta(minutes=CONFIG['TIME_WINDOW_MINUTES'])).strftime('%d-%m-%Y %H:%M:%S')
-    conn = get_db()
-    c = conn.cursor()
-    c.execute('''
-        INSERT INTO orders (order_id, api_key, amount, payable_amount, status, created_at, expires_at)
-        VALUES (?, ?, ?, ?, 'pending', ?, ?)
-    ''', (order_id, api_key, amount, amount, now, expires))
-    conn.commit()
-    conn.close()
-    return order_id
 
-def get_order(order_id):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute('SELECT * FROM orders WHERE order_id = ?', (order_id,))
-    order = c.fetchone()
-    conn.close()
-    return dict(order) if order else None
+    if supabase_client:
+        try:
+            data = {
+                'order_id': order_id,
+                'api_key': api_key,
+                'amount': amount,
+                'payable_amount': amount,
+                'status': 'pending',
+                'created_at': now,
+                'expires_at': expires
+            }
+            supabase_client.table('orders').insert(data).execute()
+            return order_id
+        except Exception as e:
+            logger.error(f"Supabase insert error: {e}")
+            # Fallback to in-memory
+            app.fallback_orders[order_id] = {
+                'order_id': order_id,
+                'api_key': api_key,
+                'amount': amount,
+                'payable_amount': amount,
+                'status': 'pending',
+                'utr': None,
+                'transaction_id': None,
+                'sender_name': None,
+                'payment_time': None,
+                'created_at': now,
+                'expires_at': expires,
+                'verified_at': None
+            }
+            return order_id
+    else:
+        app.fallback_orders[order_id] = {
+            'order_id': order_id,
+            'api_key': api_key,
+            'amount': amount,
+            'payable_amount': amount,
+            'status': 'pending',
+            'utr': None,
+            'transaction_id': None,
+            'sender_name': None,
+            'payment_time': None,
+            'created_at': now,
+            'expires_at': expires,
+            'verified_at': None
+        }
+        return order_id
 
-def update_order(order_id, **kwargs):
-    conn = get_db()
-    c = conn.cursor()
-    updates = []
-    params = []
-    for key, value in kwargs.items():
-        if value is not None:
-            updates.append(f"{key} = ?")
-            params.append(value)
-    if not updates:
-        return
-    params.append(order_id)
-    c.execute(f"UPDATE orders SET {', '.join(updates)} WHERE order_id = ?", params)
-    conn.commit()
-    conn.close()
+def db_get_order(order_id):
+    if supabase_client:
+        try:
+            result = supabase_client.table('orders').select('*').eq('order_id', order_id).execute()
+            if result.data:
+                return result.data[0]
+            # Check fallback
+            return app.fallback_orders.get(order_id)
+        except Exception as e:
+            logger.error(f"Supabase get error: {e}")
+            return app.fallback_orders.get(order_id)
+    else:
+        return app.fallback_orders.get(order_id)
 
-def get_pending_orders():
-    conn = get_db()
-    c = conn.cursor()
-    c.execute('SELECT * FROM orders WHERE status = "pending" AND datetime(expires_at, "+5:30") > datetime("now")')
-    orders = c.fetchall()
-    conn.close()
-    return [dict(o) for o in orders]
+def db_update_order(order_id, **kwargs):
+    if supabase_client:
+        try:
+            supabase_client.table('orders').update(kwargs).eq('order_id', order_id).execute()
+        except Exception as e:
+            logger.error(f"Supabase update error: {e}")
+            if order_id in app.fallback_orders:
+                app.fallback_orders[order_id].update(kwargs)
+    else:
+        if order_id in app.fallback_orders:
+            app.fallback_orders[order_id].update(kwargs)
 
-def is_utr_verified(utr):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute('SELECT 1 FROM verified_utrs WHERE utr = ?', (utr,))
-    exists = c.fetchone() is not None
-    conn.close()
-    return exists
-
-def mark_utr_verified(utr, order_id):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute('INSERT OR IGNORE INTO verified_utrs (utr, order_id, verified_at) VALUES (?, ?, ?)',
-              (utr, order_id, datetime.now().isoformat()))
-    conn.commit()
-    conn.close()
-
-def create_api_key(name, expiry_hours=24):
+def db_create_api_key(name, expiry_hours=24):
     api_key = f"fam_{secrets.token_hex(20)}"
     now = datetime.now().isoformat()
     expires = (datetime.now() + timedelta(hours=expiry_hours)).isoformat()
-    conn = get_db()
-    c = conn.cursor()
-    c.execute('''
-        INSERT INTO api_keys (api_key, name, created_at, expires_at, is_active)
-        VALUES (?, ?, ?, ?, 1)
-    ''', (api_key, name, now, expires))
-    conn.commit()
-    conn.close()
-    return api_key
+    if supabase_client:
+        try:
+            data = {'api_key': api_key, 'name': name, 'created_at': now, 'expires_at': expires, 'is_active': 1}
+            supabase_client.table('api_keys').insert(data).execute()
+            return api_key
+        except Exception as e:
+            logger.error(f"Supabase insert api_key error: {e}")
+            app.fallback_api_keys[api_key] = data
+            return api_key
+    else:
+        app.fallback_api_keys[api_key] = {'api_key': api_key, 'name': name, 'created_at': now, 'expires_at': expires, 'is_active': 1}
+        return api_key
 
-def validate_api_key(api_key):
-    conn = get_db()
-    c = conn.cursor()
-    c.execute('SELECT * FROM api_keys WHERE api_key = ? AND is_active = 1 AND datetime(expires_at) > datetime("now")', (api_key,))
-    key = c.fetchone()
-    conn.close()
-    return dict(key) if key else None
+def db_validate_api_key(api_key):
+    if supabase_client:
+        try:
+            result = supabase_client.table('api_keys').select('*').eq('api_key', api_key).eq('is_active', 1).execute()
+            if result.data:
+                key = result.data[0]
+                if datetime.now().isoformat() < key['expires_at']:
+                    return key
+            return None
+        except Exception as e:
+            logger.error(f"Supabase validate error: {e}")
+            key = app.fallback_api_keys.get(api_key)
+            if key and key['is_active'] == 1 and datetime.now().isoformat() < key['expires_at']:
+                return key
+            return None
+    else:
+        key = app.fallback_api_keys.get(api_key)
+        if key and key['is_active'] == 1 and datetime.now().isoformat() < key['expires_at']:
+            return key
+        return None
+
+def db_is_utr_verified(utr):
+    if supabase_client:
+        try:
+            result = supabase_client.table('verified_utrs').select('*').eq('utr', utr).execute()
+            return len(result.data) > 0
+        except Exception as e:
+            logger.error(f"Supabase verify utr error: {e}")
+            return utr in app.fallback_utrs
+    else:
+        return utr in app.fallback_utrs
+
+def db_mark_utr_verified(utr, order_id):
+    if supabase_client:
+        try:
+            data = {'utr': utr, 'order_id': order_id, 'verified_at': datetime.now().isoformat()}
+            supabase_client.table('verified_utrs').insert(data).execute()
+        except Exception as e:
+            logger.error(f"Supabase mark utr error: {e}")
+            app.fallback_utrs[utr] = {'order_id': order_id, 'verified_at': datetime.now().isoformat()}
+    else:
+        app.fallback_utrs[utr] = {'order_id': order_id, 'verified_at': datetime.now().isoformat()}
+
+def db_get_pending_orders():
+    if supabase_client:
+        try:
+            result = supabase_client.table('orders').select('*').eq('status', 'pending').execute()
+            return result.data
+        except Exception as e:
+            logger.error(f"Supabase get pending error: {e}")
+            return [o for o in app.fallback_orders.values() if o['status'] == 'pending']
+    else:
+        return [o for o in app.fallback_orders.values() if o['status'] == 'pending']
+
+def db_update_api_key(api_key, **kwargs):
+    if supabase_client:
+        try:
+            supabase_client.table('api_keys').update(kwargs).eq('api_key', api_key).execute()
+        except Exception as e:
+            logger.error(f"Supabase update api_key error: {e}")
+            if api_key in app.fallback_api_keys:
+                app.fallback_api_keys[api_key].update(kwargs)
+    else:
+        if api_key in app.fallback_api_keys:
+            app.fallback_api_keys[api_key].update(kwargs)
 
 # ============================================
 # GMAIL VERIFICATION (on-demand)
@@ -246,30 +273,32 @@ def parse_payment_email(body):
     elif 'successfully paid' in body.lower():
         details['type'] = 'paid'
         return details
-    # amount
+
     patterns = [r'₹([0-9]+(\.[0-9]+)?)', r'Amount\s*[:]\s*₹([0-9]+(\.[0-9]+)?)']
     for p in patterns:
         m = re.search(p, body, re.IGNORECASE)
         if m:
             details['amount'] = float(m.group(1))
             break
-    # UTR
+
     utr_patterns = [r'UTR\s*[:]\s*([0-9]+)', r'UTR\s*([0-9]+)']
     for p in utr_patterns:
         m = re.search(p, body, re.IGNORECASE)
         if m:
             details['utr'] = m.group(1)
             break
-    # transaction id
+
     tx_patterns = [r'Transaction ID\s*[:]\s*([A-Z0-9]+)', r'Txn\s*[:]\s*([A-Z0-9]+)']
     for p in tx_patterns:
         m = re.search(p, body, re.IGNORECASE)
         if m:
             details['transaction_id'] = m.group(1)
             break
+
     sender_match = re.search(r'from\s*([A-Za-z\s.]+)', body, re.IGNORECASE)
     if sender_match:
         details['sender'] = sender_match.group(1).strip()
+
     date_match = re.search(r'([0-9]{2}:[0-9]{2}\s*(AM|PM)\s*IST,\s*[0-9]{2}\s*[A-Za-z]+\s*[0-9]{4})', body, re.IGNORECASE)
     if date_match:
         details['date'] = date_match.group(1)
@@ -353,7 +382,7 @@ def search_gmail_payment(amount=None, utr=None, time_window=None):
                 pass
 
 # ============================================
-# ADMIN ROUTES (protected by admin_key)
+# ADMIN ROUTES
 # ============================================
 ADMIN_KEY = CONFIG['ADMIN_API_KEY']
 
@@ -380,7 +409,7 @@ def apikey_generate():
     elif days:
         try: expiry_hours = int(days) * 24
         except: pass
-    api_key = create_api_key(name, expiry_hours)
+    api_key = db_create_api_key(name, expiry_hours)
     return jsonify({
         'status': 'success',
         'api_key': api_key,
@@ -392,23 +421,21 @@ def apikey_generate():
 def admin_orders():
     if not admin_required():
         return jsonify({'status': 'error', 'message': 'Invalid or missing admin_key'}), 401
-    conn = get_db()
-    c = conn.cursor()
-    c.execute('SELECT * FROM orders ORDER BY created_at DESC LIMIT 50')
-    orders = c.fetchall()
-    conn.close()
-    return jsonify({'status': 'success', 'orders': [dict(o) for o in orders]})
+    orders = db_get_pending_orders()
+    return jsonify({'status': 'success', 'orders': orders})
 
 @app.route('/admin_keys', methods=['GET'])
 def admin_keys():
     if not admin_required():
         return jsonify({'status': 'error', 'message': 'Invalid or missing admin_key'}), 401
-    conn = get_db()
-    c = conn.cursor()
-    c.execute('SELECT * FROM api_keys ORDER BY created_at DESC')
-    keys = c.fetchall()
-    conn.close()
-    return jsonify({'status': 'success', 'api_keys': [dict(k) for k in keys]})
+    if supabase_client:
+        try:
+            result = supabase_client.table('api_keys').select('*').execute()
+            return jsonify({'status': 'success', 'api_keys': result.data})
+        except:
+            return jsonify({'status': 'success', 'api_keys': list(app.fallback_api_keys.values())})
+    else:
+        return jsonify({'status': 'success', 'api_keys': list(app.fallback_api_keys.values())})
 
 @app.route('/admin_revoke', methods=['GET'])
 def admin_revoke():
@@ -417,11 +444,7 @@ def admin_revoke():
     api_key = request.args.get('api_key')
     if not api_key:
         return jsonify({'status': 'error', 'message': 'api_key parameter required'}), 400
-    conn = get_db()
-    c = conn.cursor()
-    c.execute('UPDATE api_keys SET is_active = 0 WHERE api_key = ?', (api_key,))
-    conn.commit()
-    conn.close()
+    db_update_api_key(api_key, is_active=0)
     return jsonify({'status': 'success', 'message': f'API key {api_key} revoked'})
 
 @app.route('/admin_verify', methods=['GET'])
@@ -432,15 +455,15 @@ def admin_verify():
     utr = request.args.get('utr')
     if not order_id or not utr:
         return jsonify({'status': 'error', 'message': 'order_id and utr parameters required'}), 400
-    order = get_order(order_id)
+    order = db_get_order(order_id)
     if not order:
         return jsonify({'status': 'error', 'message': 'Order not found'}), 404
     if order['status'] == 'verified':
         return jsonify({'status': 'error', 'message': 'Order already verified'}), 400
-    if is_utr_verified(utr):
+    if db_is_utr_verified(utr):
         return jsonify({'status': 'error', 'message': 'UTR already used'}), 400
-    update_order(order_id, status='verified', utr=utr)
-    mark_utr_verified(utr, order_id)
+    db_update_order(order_id, status='verified', utr=utr)
+    db_mark_utr_verified(utr, order_id)
     return jsonify({'status': 'success', 'message': 'Order verified manually'})
 
 # ============================================
@@ -452,7 +475,7 @@ def api_qr():
     amount = request.args.get('amount')
     if not api_key or not amount:
         return jsonify({'status': 'error', 'message': 'api_key and amount required'}), 400
-    key_info = validate_api_key(api_key)
+    key_info = db_validate_api_key(api_key)
     if not key_info:
         return jsonify({'status': 'error', 'message': 'Invalid or expired API key'}), 401
     try:
@@ -461,8 +484,8 @@ def api_qr():
             raise ValueError
     except:
         return jsonify({'status': 'error', 'message': 'Invalid amount'}), 400
-    order_id = create_order(api_key, amount)
-    order = get_order(order_id)
+    order_id = db_create_order(api_key, amount)
+    order = db_get_order(order_id)
     upi_intent = f"upi://pay?pa={CONFIG['UPI_ID']}&pn=FamPay&tr={order_id}&tn=Payment+for+Order+{order_id}&am={amount}&cu=INR"
     base_url = request.url_root.rstrip('/')
     qr_url = f"{base_url}/api/qr-image.php?order_id={order_id}"
@@ -488,31 +511,30 @@ def api_verify_order():
     order_id = request.args.get('order_id')
     if not api_key or not order_id:
         return jsonify({'status': 'error', 'message': 'api_key and order_id required'}), 400
-    if not validate_api_key(api_key):
+    if not db_validate_api_key(api_key):
         return jsonify({'status': 'error', 'message': 'Invalid API key'}), 401
-    order = get_order(order_id)
+    order = db_get_order(order_id)
     if not order:
         return jsonify({'status': 'error', 'message': 'Order not found'}), 404
-    
-    # Check expiry first
+
     now = datetime.now()
     expires = datetime.strptime(order['expires_at'], '%d-%m-%Y %H:%M:%S')
     if now > expires and order['status'] == 'pending':
-        update_order(order_id, status='expired')
-        order = get_order(order_id)
-    
+        db_update_order(order_id, status='expired')
+        order = db_get_order(order_id)
+
     if order['status'] == 'pending':
         payment = search_gmail_payment(amount=order['amount'])
         if payment:
             utr = payment.get('utr')
-            if utr and not is_utr_verified(utr):
-                update_order(order_id, status='verified', utr=utr,
+            if utr and not db_is_utr_verified(utr):
+                db_update_order(order_id, status='verified', utr=utr,
                              transaction_id=payment.get('transaction_id'),
                              sender_name=payment.get('sender'),
                              payment_time=payment.get('date'))
-                mark_utr_verified(utr, order_id)
-                order = get_order(order_id)
-    
+                db_mark_utr_verified(utr, order_id)
+                order = db_get_order(order_id)
+
     return jsonify({
         'status': 'success',
         'data': {
@@ -520,10 +542,10 @@ def api_verify_order():
             'status': order['status'],
             'amount': order['amount'],
             'payable_amount': order['payable_amount'],
-            'utr': order['utr'],
-            'transaction_id': order['transaction_id'],
-            'sender_name': order['sender_name'],
-            'payment_time_ist': order['payment_time']
+            'utr': order.get('utr'),
+            'transaction_id': order.get('transaction_id'),
+            'sender_name': order.get('sender_name'),
+            'payment_time_ist': order.get('payment_time')
         }
     })
 
@@ -532,28 +554,29 @@ def qr_image():
     order_id = request.args.get('order_id')
     if not order_id:
         return jsonify({'status': 'error', 'message': 'order_id required'}), 400
-    order = get_order(order_id)
+    order = db_get_order(order_id)
     if not order:
         return jsonify({'status': 'error', 'message': 'Order not found'}), 404
     upi_intent = f"upi://pay?pa={CONFIG['UPI_ID']}&pn=FamPay&tr={order_id}&tn=Payment+for+Order+{order_id}&am={order['amount']}&cu=INR"
+    # Colored QR Code
     qr = qrcode.QRCode(box_size=10, border=4)
     qr.add_data(upi_intent)
     qr.make(fit=True)
-    img = qr.make_image(fill_color="black", back_color="white")
+    img = qr.make_image(fill_color="#8b5cf6", back_color="#0a0a1a")
     img_io = BytesIO()
     img.save(img_io, 'PNG')
     img_io.seek(0)
     return send_file(img_io, mimetype='image/png')
 
 # ============================================
-# PAYMENT PAGE (with auto-check)
+# PAYMENT PAGE (Colorful UI)
 # ============================================
 @app.route('/pay.php', methods=['GET'])
 def pay_page():
     order_id = request.args.get('order_id')
     if not order_id:
         return "Order ID missing", 400
-    order = get_order(order_id)
+    order = db_get_order(order_id)
     if not order:
         return "Order not found", 404
 
@@ -566,8 +589,8 @@ def pay_page():
     status = order['status']
 
     if status == 'verified':
-        return render_template_string(SUCCESS_PAGE, 
-            order_id=order_id, 
+        return render_template_string(SUCCESS_PAGE,
+            order_id=order_id,
             utr=order.get('utr', 'N/A'),
             amount=amount,
             merchant=merchant,
@@ -579,7 +602,7 @@ def pay_page():
     expires_dt = datetime.strptime(expires_at, '%d-%m-%Y %H:%M:%S')
     if now > expires_dt:
         if order['status'] == 'pending':
-            update_order(order_id, status='expired')
+            db_update_order(order_id, status='expired')
         return render_template_string(EXPIRED_PAGE,
             order_id=order_id,
             amount=amount,
@@ -597,7 +620,7 @@ def pay_page():
     )
 
 # ============================================
-# HTML TEMPLATES
+# HTML TEMPLATES (Colorful UI with Glow)
 # ============================================
 SUCCESS_PAGE = '''
 <!DOCTYPE html>
@@ -605,7 +628,7 @@ SUCCESS_PAGE = '''
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Payment Successful ✅</title>
+    <title>Payment Successful 🎉</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -621,35 +644,36 @@ SUCCESS_PAGE = '''
         .glow-bg {
             position: fixed;
             top: 0; left: 0; width: 100%; height: 100%;
-            background: radial-gradient(circle at center, #1a0533 0%, #0a0a1a 100%);
+            background: radial-gradient(circle at 30% 40%, #1a0533 0%, #0a0a1a 70%, #000 100%);
             z-index: 0;
         }
         .glow-ring {
             position: absolute;
             border-radius: 50%;
-            filter: blur(60px);
-            animation: glowPulse 2s ease-in-out infinite alternate;
+            filter: blur(80px);
+            animation: glowPulse 3s ease-in-out infinite alternate;
         }
-        .ring1 { width: 400px; height: 400px; top: 10%; left: 20%; background: #8b5cf6; opacity: 0.15; }
-        .ring2 { width: 500px; height: 500px; bottom: 10%; right: 15%; background: #ec4899; opacity: 0.12; }
-        .ring3 { width: 300px; height: 300px; top: 50%; left: 60%; background: #06b6d4; opacity: 0.10; }
+        .ring1 { width: 500px; height: 500px; top: 0%; left: 10%; background: #8b5cf6; opacity: 0.2; }
+        .ring2 { width: 600px; height: 600px; bottom: 10%; right: 5%; background: #ec4899; opacity: 0.15; }
+        .ring3 { width: 400px; height: 400px; top: 50%; left: 50%; background: #06b6d4; opacity: 0.12; }
+        .ring4 { width: 300px; height: 300px; top: 20%; right: 20%; background: #f59e0b; opacity: 0.1; }
         @keyframes glowPulse {
-            0% { transform: scale(1); opacity: 0.5; }
-            100% { transform: scale(1.5); opacity: 0.8; }
+            0% { transform: scale(1) rotate(0deg); opacity: 0.3; }
+            100% { transform: scale(1.6) rotate(180deg); opacity: 0.7; }
         }
         .success-container {
             position: relative;
             z-index: 2;
             background: rgba(255,255,255,0.05);
-            backdrop-filter: blur(20px);
+            backdrop-filter: blur(30px);
             border-radius: 32px;
             padding: 50px 40px;
             max-width: 460px;
             width: 100%;
             text-align: center;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+            box-shadow: 0 30px 80px rgba(0,0,0,0.6), 0 0 60px rgba(139,92,246,0.1);
             border: 1px solid rgba(255,255,255,0.08);
-            animation: popIn 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
+            animation: popIn 0.7s cubic-bezier(0.34, 1.56, 0.64, 1);
         }
         @keyframes popIn {
             0% { transform: scale(0.8) rotate(-5deg); opacity: 0; }
@@ -658,13 +682,13 @@ SUCCESS_PAGE = '''
         .checkmark {
             width: 100px;
             height: 100px;
-            background: linear-gradient(135deg, #34d399, #10b981);
+            background: linear-gradient(135deg, #34d399, #10b981, #059669);
             border-radius: 50%;
             display: flex;
             align-items: center;
             justify-content: center;
             margin: 0 auto 20px;
-            box-shadow: 0 0 40px rgba(52, 211, 153, 0.4);
+            box-shadow: 0 0 60px rgba(52, 211, 153, 0.5), 0 0 120px rgba(52, 211, 153, 0.2);
             animation: bounceIn 0.8s ease;
         }
         .checkmark svg {
@@ -688,10 +712,17 @@ SUCCESS_PAGE = '''
         @keyframes drawCheck {
             100% { stroke-dashoffset: 0; }
         }
-        h1 { font-size: 28px; color: #fff; margin: 10px 0 6px; font-weight: 600; }
+        h1 {
+            font-size: 28px;
+            background: linear-gradient(135deg, #34d399, #60a5fa, #a78bfa);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin: 10px 0 6px;
+            font-weight: 700;
+        }
         .sub { color: #94a3b8; font-size: 16px; margin-bottom: 24px; }
         .detail-box {
-            background: rgba(255,255,255,0.06);
+            background: rgba(255,255,255,0.05);
             border-radius: 16px;
             padding: 20px;
             text-align: left;
@@ -702,24 +733,24 @@ SUCCESS_PAGE = '''
             display: flex;
             justify-content: space-between;
             padding: 8px 0;
-            font-size: 15px;
-            border-bottom: 1px solid rgba(255,255,255,0.06);
+            font-size: 14px;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
         }
         .detail-row:last-child { border: none; }
         .detail-row .label { color: #94a3b8; }
         .detail-row .value { font-weight: 500; color: #e2e8f0; }
         .btn {
             display: inline-block;
-            background: linear-gradient(135deg, #8b5cf6, #6366f1);
+            background: linear-gradient(135deg, #8b5cf6, #6366f1, #4f46e5);
             color: white;
-            padding: 12px 32px;
+            padding: 12px 36px;
             border-radius: 40px;
             text-decoration: none;
-            font-weight: 500;
+            font-weight: 600;
             transition: transform 0.2s, box-shadow 0.2s;
-            box-shadow: 0 4px 20px rgba(99,102,241,0.3);
+            box-shadow: 0 4px 30px rgba(99,102,241,0.4);
         }
-        .btn:hover { transform: scale(1.03); box-shadow: 0 6px 30px rgba(99,102,241,0.5); }
+        .btn:hover { transform: scale(1.05); box-shadow: 0 6px 40px rgba(99,102,241,0.6); }
         .confetti-container {
             position: fixed;
             top: 0; left: 0;
@@ -735,8 +766,8 @@ SUCCESS_PAGE = '''
             animation: confettiFall linear forwards;
         }
         @keyframes confettiFall {
-            0% { transform: translateY(-10px) rotate(0deg); opacity: 1; }
-            100% { transform: translateY(110vh) rotate(720deg); opacity: 0; }
+            0% { transform: translateY(-10px) rotate(0deg) scale(1); opacity: 1; }
+            100% { transform: translateY(110vh) rotate(720deg) scale(0.5); opacity: 0; }
         }
     </style>
 </head>
@@ -745,6 +776,7 @@ SUCCESS_PAGE = '''
         <div class="glow-ring ring1"></div>
         <div class="glow-ring ring2"></div>
         <div class="glow-ring ring3"></div>
+        <div class="glow-ring ring4"></div>
     </div>
     <div class="confetti-container" id="confetti"></div>
     <div class="success-container">
@@ -752,7 +784,7 @@ SUCCESS_PAGE = '''
             <svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>
         </div>
         <h1>Payment Successful!</h1>
-        <p class="sub">Your order has been verified instantly.</p>
+        <p class="sub">Your order has been verified instantly</p>
         <div class="detail-box">
             <div class="detail-row"><span class="label">Order ID</span><span class="value">{{ order_id }}</span></div>
             <div class="detail-row"><span class="label">Amount</span><span class="value">₹ {{ amount }}</span></div>
@@ -765,8 +797,8 @@ SUCCESS_PAGE = '''
     <script>
         (function() {
             const container = document.getElementById('confetti');
-            const colors = ['#ff6b6b', '#fbbf24', '#34d399', '#60a5fa', '#a78bfa', '#f472b6', '#fb923c', '#22d3ee'];
-            for (let i = 0; i < 100; i++) {
+            const colors = ['#ff6b6b', '#fbbf24', '#34d399', '#60a5fa', '#a78bfa', '#f472b6', '#fb923c', '#22d3ee', '#f43f5e', '#8b5cf6'];
+            for (let i = 0; i < 120; i++) {
                 const el = document.createElement('div');
                 el.className = 'confetti';
                 el.style.left = Math.random() * 100 + '%';
@@ -775,7 +807,7 @@ SUCCESS_PAGE = '''
                 el.style.background = colors[Math.floor(Math.random() * colors.length)];
                 el.style.borderRadius = Math.random() > 0.5 ? '50%' : '2px';
                 el.style.animationDuration = (Math.random() * 2.5 + 1.5) + 's';
-                el.style.animationDelay = (Math.random() * 2) + 's';
+                el.style.animationDelay = (Math.random() * 2.5) + 's';
                 container.appendChild(el);
             }
         })();
@@ -866,44 +898,66 @@ PAYMENT_PAGE_TEMPLATE = '''
             min-height: 100vh;
             padding: 20px;
         }}
+        .glow-bg {{
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: radial-gradient(circle at 30% 40%, #1a0533 0%, #0a0a1a 70%, #000 100%);
+            z-index: 0;
+        }}
+        .glow-ring {{
+            position: absolute;
+            border-radius: 50%;
+            filter: blur(80px);
+            animation: glowPulse 4s ease-in-out infinite alternate;
+        }}
+        .ring1 {{ width: 400px; height: 400px; top: 0%; left: 10%; background: #8b5cf6; opacity: 0.15; }}
+        .ring2 {{ width: 500px; height: 500px; bottom: 10%; right: 5%; background: #ec4899; opacity: 0.1; }}
+        .ring3 {{ width: 300px; height: 300px; top: 50%; left: 50%; background: #06b6d4; opacity: 0.08; }}
+        @keyframes glowPulse {{
+            0% {{ transform: scale(1) rotate(0deg); opacity: 0.2; }}
+            100% {{ transform: scale(1.5) rotate(180deg); opacity: 0.5; }}
+        }}
         .card {{
+            position: relative;
+            z-index: 2;
             background: rgba(255,255,255,0.05);
-            backdrop-filter: blur(20px);
-            border-radius: 24px;
+            backdrop-filter: blur(30px);
+            border-radius: 28px;
             padding: 30px;
             max-width: 420px;
             width: 100%;
             border: 1px solid rgba(255,255,255,0.08);
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            box-shadow: 0 30px 80px rgba(0,0,0,0.5);
         }}
         .header {{ text-align: center; margin-bottom: 24px; }}
-        .header .brand {{ font-size: 20px; font-weight: 700; color: #f1f5f9; letter-spacing: -0.5px; }}
-        .header .brand span {{ color: #8b5cf6; }}
+        .header .brand {{ font-size: 22px; font-weight: 700; color: #f1f5f9; letter-spacing: -0.5px; }}
+        .header .brand span {{ background: linear-gradient(135deg, #8b5cf6, #ec4899, #f59e0b); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }}
         .order-total {{
-            background: rgba(139,92,246,0.12);
+            background: linear-gradient(135deg, rgba(139,92,246,0.15), rgba(236,72,153,0.1));
             border-radius: 16px;
             padding: 20px;
             text-align: center;
             margin-bottom: 24px;
             border: 1px solid rgba(139,92,246,0.15);
         }}
-        .order-total .label {{ font-size: 14px; color: #94a3b8; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }}
-        .order-total .amount {{ font-size: 36px; font-weight: 700; color: #e2e8f0; margin-top: 4px; }}
-        .order-total .currency {{ font-size: 20px; color: #94a3b8; }}
+        .order-total .label {{ font-size: 13px; color: #94a3b8; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }}
+        .order-total .amount {{ font-size: 38px; font-weight: 700; background: linear-gradient(135deg, #f1f5f9, #94a3b8); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-top: 4px; }}
+        .order-total .currency {{ font-size: 20px; color: #64748b; -webkit-text-fill-color: #64748b; }}
         .qr-section {{ text-align: center; margin: 20px 0 16px; }}
-        .qr-section img {{ width: 200px; height: 200px; border: 2px solid rgba(255,255,255,0.1); border-radius: 16px; padding: 8px; background: white; }}
+        .qr-section img {{ width: 200px; height: 200px; border: 2px solid rgba(139,92,246,0.2); border-radius: 16px; padding: 8px; background: white; box-shadow: 0 0 40px rgba(139,92,246,0.15); }}
         .qr-section .sub {{ font-size: 14px; color: #94a3b8; margin-top: 8px; }}
         .qr-section .save-btn {{
             display: inline-block;
             margin-top: 10px;
             background: rgba(255,255,255,0.08);
             color: #e2e8f0;
-            padding: 8px 18px;
+            padding: 8px 20px;
             border-radius: 30px;
             font-size: 14px;
             font-weight: 500;
             text-decoration: none;
             transition: 0.2s;
+            border: 1px solid rgba(255,255,255,0.05);
         }}
         .qr-section .save-btn:hover {{ background: rgba(255,255,255,0.15); }}
         .details {{ margin: 20px 0; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 20px; }}
@@ -922,7 +976,7 @@ PAYMENT_PAGE_TEMPLATE = '''
             display: flex;
             align-items: center;
             justify-content: center;
-            gap: 8px;
+            gap: 10px;
             border: 1px solid rgba(139,92,246,0.15);
         }}
         .status .spinner {{
@@ -940,13 +994,25 @@ PAYMENT_PAGE_TEMPLATE = '''
         .status.expired {{ background: rgba(248,113,113,0.12); color: #f87171; border-color: rgba(248,113,113,0.2); }}
         .status.expired .spinner {{ display: none; }}
         .check-link {{ text-align: center; margin-top: 12px; font-size: 14px; }}
-        .check-link a {{ color: #8b5cf6; text-decoration: none; font-weight: 500; }}
-        .check-link a:hover {{ text-decoration: underline; }}
-        .footer {{ text-align: center; margin-top: 20px; font-size: 13px; color: #64748b; }}
+        .check-link a {{ color: #8b5cf6; text-decoration: none; font-weight: 500; transition: 0.2s; }}
+        .check-link a:hover {{ text-decoration: underline; color: #a78bfa; }}
+        .footer {{ text-align: center; margin-top: 20px; font-size: 13px; color: #475569; }}
         .timer-warning {{ color: #f87171; font-weight: 600; }}
+        .glow-text {{
+            animation: textGlow 2s ease-in-out infinite alternate;
+        }}
+        @keyframes textGlow {{
+            0% {{ text-shadow: 0 0 20px rgba(139,92,246,0.2); }}
+            100% {{ text-shadow: 0 0 40px rgba(139,92,246,0.4); }}
+        }}
     </style>
 </head>
 <body>
+    <div class="glow-bg">
+        <div class="glow-ring ring1"></div>
+        <div class="glow-ring ring2"></div>
+        <div class="glow-ring ring3"></div>
+    </div>
     <div class="card">
         <div class="header"><div class="brand">Fam<span>Gateway</span>™</div></div>
         <div class="order-total">
@@ -963,7 +1029,7 @@ PAYMENT_PAGE_TEMPLATE = '''
             <div class="detail-row"><span class="label">Order ID</span><span class="value">{order_id}</span></div>
             <div class="detail-row">
                 <span class="label">Expires In</span>
-                <span class="value" id="timer">--:--</span>
+                <span class="value glow-text" id="timer">--:--</span>
             </div>
         </div>
         <div class="status" id="status">
@@ -986,7 +1052,7 @@ PAYMENT_PAGE_TEMPLATE = '''
             let diff = expires - now;
             if (diff < 0) {{
                 timerEl.textContent = 'Expired';
-                timerEl.className = 'timer-warning';
+                timerEl.className = 'timer-warning glow-text';
                 document.getElementById('status').className = 'status expired';
                 document.getElementById('status-text').textContent = '⏰ Order expired';
                 return;
@@ -1026,7 +1092,7 @@ PAYMENT_PAGE_TEMPLATE = '''
 '''
 
 # ============================================
-# VERIFICATION ENDPOINTS (fast)
+# VERIFICATION ENDPOINTS
 # ============================================
 @app.route('/verify-fast', methods=['GET'])
 def verify_fast():
@@ -1120,7 +1186,8 @@ def generate_qr_legacy():
     qr = qrcode.QRCode(box_size=10, border=4)
     qr.add_data(upi_intent)
     qr.make(fit=True)
-    img = qr.make_image(fill_color="black", back_color="white")
+    # Colored QR
+    img = qr.make_image(fill_color="#8b5cf6", back_color="#0a0a1a")
     img_io = BytesIO()
     img.save(img_io, 'PNG')
     img_io.seek(0)
@@ -1135,40 +1202,33 @@ def debug_emails():
 def health():
     return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
 
-# ============================================
-# ROOT – Public documentation (no admin key exposed)
-# ============================================
 @app.route('/', methods=['GET'])
 def index():
     base_url = request.url_root.rstrip('/')
     return jsonify({
         'name': 'UPI Auto-Payment Verifier',
-        'version': '4.1.0',
-        'description': 'Payment verification system with auto-verify, expiry, and glow UI.',
+        'version': '5.0.0',
+        'description': 'Colorful payment verification with Supabase, glow animations, and colored QR codes.',
         'endpoints': {
             'public': {
                 '/': 'GET - This documentation',
                 '/health': 'GET - Health check',
-                '/generate-qr': 'GET - Generate QR for any amount (e.g., ?amount=499)',
-                '/verify-fast': 'GET - Instant verify by amount or UTR (e.g., ?amount=1 or ?utr=123)',
+                '/generate-qr': 'GET - Generate colored QR (e.g., ?amount=499)',
+                '/verify-fast': 'GET - Instant verify by amount or UTR',
                 '/verify-by-utr': 'GET/POST - Verify by UTR only',
                 '/verify-last-payment': 'GET - One-shot check by amount',
-                '/verify-payment': 'GET/POST - Legacy polling (instant now)',
+                '/verify-payment': 'GET/POST - Legacy polling',
                 '/api/qr.php': 'GET - Create order and get QR (api_key, amount)',
                 '/api/verify-order.php': 'GET - Check order status (api_key, order_id)',
-                '/api/qr-image.php': 'GET - Get QR image (order_id)',
-                '/pay.php': 'GET - Payment page (order_id)',
-                '/debug-emails': 'GET - Debug (last payment)'
+                '/api/qr-image.php': 'GET - Get colored QR image (order_id)',
+                '/pay.php': 'GET - Payment page with glow UI (order_id)',
+                '/debug-emails': 'GET - Debug'
             }
         },
         'examples': {
             'create_order': f'curl "{base_url}/api/qr.php?api_key=fam_YOUR_KEY&amount=499"',
             'verify_by_amount': f'curl "{base_url}/verify-fast?amount=1"',
-            'verify_by_utr': f'curl "{base_url}/verify-fast?utr=006175980105"',
-            'check_order': f'curl "{base_url}/api/verify-order.php?api_key=fam_YOUR_KEY&order_id=Khan_PEQ1JTMI"',
-            'generate_qr_image': f'curl "{base_url}/generate-qr?amount=499" --output qr.png',
-            'payment_page': f'Open in browser: {base_url}/pay.php?order_id=Khan_PEQ1JTMI',
-            'health': f'curl {base_url}/health'
+            'payment_page': f'Open in browser: {base_url}/pay.php?order_id=Khan_YOUR_ID'
         }
     })
 
