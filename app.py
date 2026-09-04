@@ -29,7 +29,7 @@ CONFIG = {
     'GMAIL_EMAIL': os.getenv('GMAIL_EMAIL', 'nkg166465@gmail.com'),
     'TIME_WINDOW_MINUTES': int(os.getenv('TIME_WINDOW_MINUTES', 5)),
     'DB_FILE': os.getenv('DB_FILE', '/tmp/orders.db'),  # Vercel: /tmp writable
-    'ADMIN_API_KEY': os.getenv('ADMIN_API_KEY', 'admin_1234567890'),
+    'ADMIN_API_KEY': os.getenv('ADMIN_API_KEY', 'khanbro786'),
     'MAX_EMAILS_CHECK': int(os.getenv('MAX_EMAILS_CHECK', 50)),
     'CACHE_EXPIRE_SECONDS': int(os.getenv('CACHE_EXPIRE_SECONDS', 600)),
 }
