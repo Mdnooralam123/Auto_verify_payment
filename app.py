@@ -1,6 +1,6 @@
 """
 UPI Auto-Payment Verifier – Vercel + Supabase Edition
-Colorful UI, glow animations, colored QR codes, all in one file.
+All credentials have fallback defaults; set env vars to override.
 """
 
 import os
@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, send_file, render_template_string
 from flask_cors import CORS
 
-# Optional Supabase import (if installed)
+# Supabase (optional)
 try:
     from supabase import create_client
     SUPABASE_AVAILABLE = True
@@ -26,7 +26,7 @@ except ImportError:
     create_client = None
 
 # ============================================
-# CONFIGURATION
+# CONFIG – with hardcoded defaults (original)
 # ============================================
 CONFIG = {
     'UPI_ID': os.getenv('UPI_ID', '9304619487@fam'),
@@ -53,72 +53,45 @@ app = Flask(__name__)
 CORS(app)
 
 # ============================================
-# DATABASE SETUP (Supabase or Fallback)
+# SUPABASE CLIENT (or fallback)
 # ============================================
 if CONFIG['SUPABASE_URL'] and CONFIG['SUPABASE_KEY'] and SUPABASE_AVAILABLE:
     supabase_client = create_client(CONFIG['SUPABASE_URL'], CONFIG['SUPABASE_KEY'])
     logger.info("Supabase client initialized.")
 else:
     supabase_client = None
-    logger.warning("Supabase not configured. Using in-memory fallback (data lost on restart).")
+    logger.warning("Supabase not configured. Using in‑memory fallback (data lost on restart).")
 
-# Fallback storage (in-memory)
+# In‑memory fallback storage
 app.fallback_orders = {}
 app.fallback_api_keys = {}
 app.fallback_utrs = {}
 
+# ============================================
+# DATABASE HELPERS (Supabase + fallback)
+# ============================================
 def db_create_order(api_key, amount):
     order_id = f"Khan_{secrets.token_hex(4).upper()}"
     now = datetime.now().strftime('%d-%m-%Y %H:%M:%S')
     expires = (datetime.now() + timedelta(minutes=CONFIG['TIME_WINDOW_MINUTES'])).strftime('%d-%m-%Y %H:%M:%S')
-
+    data = {
+        'order_id': order_id,
+        'api_key': api_key,
+        'amount': amount,
+        'payable_amount': amount,
+        'status': 'pending',
+        'created_at': now,
+        'expires_at': expires
+    }
     if supabase_client:
         try:
-            data = {
-                'order_id': order_id,
-                'api_key': api_key,
-                'amount': amount,
-                'payable_amount': amount,
-                'status': 'pending',
-                'created_at': now,
-                'expires_at': expires
-            }
             supabase_client.table('orders').insert(data).execute()
-            return order_id
         except Exception as e:
             logger.error(f"Supabase insert error: {e}")
-            # Fallback to in-memory
-            app.fallback_orders[order_id] = {
-                'order_id': order_id,
-                'api_key': api_key,
-                'amount': amount,
-                'payable_amount': amount,
-                'status': 'pending',
-                'utr': None,
-                'transaction_id': None,
-                'sender_name': None,
-                'payment_time': None,
-                'created_at': now,
-                'expires_at': expires,
-                'verified_at': None
-            }
-            return order_id
+            app.fallback_orders[order_id] = data
     else:
-        app.fallback_orders[order_id] = {
-            'order_id': order_id,
-            'api_key': api_key,
-            'amount': amount,
-            'payable_amount': amount,
-            'status': 'pending',
-            'utr': None,
-            'transaction_id': None,
-            'sender_name': None,
-            'payment_time': None,
-            'created_at': now,
-            'expires_at': expires,
-            'verified_at': None
-        }
-        return order_id
+        app.fallback_orders[order_id] = data
+    return order_id
 
 def db_get_order(order_id):
     if supabase_client:
@@ -126,13 +99,9 @@ def db_get_order(order_id):
             result = supabase_client.table('orders').select('*').eq('order_id', order_id).execute()
             if result.data:
                 return result.data[0]
-            # Check fallback
-            return app.fallback_orders.get(order_id)
         except Exception as e:
             logger.error(f"Supabase get error: {e}")
-            return app.fallback_orders.get(order_id)
-    else:
-        return app.fallback_orders.get(order_id)
+    return app.fallback_orders.get(order_id)
 
 def db_update_order(order_id, **kwargs):
     if supabase_client:
@@ -150,18 +119,16 @@ def db_create_api_key(name, expiry_hours=24):
     api_key = f"fam_{secrets.token_hex(20)}"
     now = datetime.now().isoformat()
     expires = (datetime.now() + timedelta(hours=expiry_hours)).isoformat()
+    data = {'api_key': api_key, 'name': name, 'created_at': now, 'expires_at': expires, 'is_active': 1}
     if supabase_client:
         try:
-            data = {'api_key': api_key, 'name': name, 'created_at': now, 'expires_at': expires, 'is_active': 1}
             supabase_client.table('api_keys').insert(data).execute()
-            return api_key
         except Exception as e:
             logger.error(f"Supabase insert api_key error: {e}")
             app.fallback_api_keys[api_key] = data
-            return api_key
     else:
-        app.fallback_api_keys[api_key] = {'api_key': api_key, 'name': name, 'created_at': now, 'expires_at': expires, 'is_active': 1}
-        return api_key
+        app.fallback_api_keys[api_key] = data
+    return api_key
 
 def db_validate_api_key(api_key):
     if supabase_client:
@@ -174,15 +141,10 @@ def db_validate_api_key(api_key):
             return None
         except Exception as e:
             logger.error(f"Supabase validate error: {e}")
-            key = app.fallback_api_keys.get(api_key)
-            if key and key['is_active'] == 1 and datetime.now().isoformat() < key['expires_at']:
-                return key
-            return None
-    else:
-        key = app.fallback_api_keys.get(api_key)
-        if key and key['is_active'] == 1 and datetime.now().isoformat() < key['expires_at']:
-            return key
-        return None
+    key = app.fallback_api_keys.get(api_key)
+    if key and key['is_active'] == 1 and datetime.now().isoformat() < key['expires_at']:
+        return key
+    return None
 
 def db_is_utr_verified(utr):
     if supabase_client:
@@ -191,20 +153,18 @@ def db_is_utr_verified(utr):
             return len(result.data) > 0
         except Exception as e:
             logger.error(f"Supabase verify utr error: {e}")
-            return utr in app.fallback_utrs
-    else:
-        return utr in app.fallback_utrs
+    return utr in app.fallback_utrs
 
 def db_mark_utr_verified(utr, order_id):
+    data = {'utr': utr, 'order_id': order_id, 'verified_at': datetime.now().isoformat()}
     if supabase_client:
         try:
-            data = {'utr': utr, 'order_id': order_id, 'verified_at': datetime.now().isoformat()}
             supabase_client.table('verified_utrs').insert(data).execute()
         except Exception as e:
             logger.error(f"Supabase mark utr error: {e}")
-            app.fallback_utrs[utr] = {'order_id': order_id, 'verified_at': datetime.now().isoformat()}
+            app.fallback_utrs[utr] = data
     else:
-        app.fallback_utrs[utr] = {'order_id': order_id, 'verified_at': datetime.now().isoformat()}
+        app.fallback_utrs[utr] = data
 
 def db_get_pending_orders():
     if supabase_client:
@@ -213,9 +173,7 @@ def db_get_pending_orders():
             return result.data
         except Exception as e:
             logger.error(f"Supabase get pending error: {e}")
-            return [o for o in app.fallback_orders.values() if o['status'] == 'pending']
-    else:
-        return [o for o in app.fallback_orders.values() if o['status'] == 'pending']
+    return [o for o in app.fallback_orders.values() if o['status'] == 'pending']
 
 def db_update_api_key(api_key, **kwargs):
     if supabase_client:
@@ -273,32 +231,27 @@ def parse_payment_email(body):
     elif 'successfully paid' in body.lower():
         details['type'] = 'paid'
         return details
-
     patterns = [r'₹([0-9]+(\.[0-9]+)?)', r'Amount\s*[:]\s*₹([0-9]+(\.[0-9]+)?)']
     for p in patterns:
         m = re.search(p, body, re.IGNORECASE)
         if m:
             details['amount'] = float(m.group(1))
             break
-
     utr_patterns = [r'UTR\s*[:]\s*([0-9]+)', r'UTR\s*([0-9]+)']
     for p in utr_patterns:
         m = re.search(p, body, re.IGNORECASE)
         if m:
             details['utr'] = m.group(1)
             break
-
     tx_patterns = [r'Transaction ID\s*[:]\s*([A-Z0-9]+)', r'Txn\s*[:]\s*([A-Z0-9]+)']
     for p in tx_patterns:
         m = re.search(p, body, re.IGNORECASE)
         if m:
             details['transaction_id'] = m.group(1)
             break
-
     sender_match = re.search(r'from\s*([A-Za-z\s.]+)', body, re.IGNORECASE)
     if sender_match:
         details['sender'] = sender_match.group(1).strip()
-
     date_match = re.search(r'([0-9]{2}:[0-9]{2}\s*(AM|PM)\s*IST,\s*[0-9]{2}\s*[A-Za-z]+\s*[0-9]{4})', body, re.IGNORECASE)
     if date_match:
         details['date'] = date_match.group(1)
@@ -433,9 +386,8 @@ def admin_keys():
             result = supabase_client.table('api_keys').select('*').execute()
             return jsonify({'status': 'success', 'api_keys': result.data})
         except:
-            return jsonify({'status': 'success', 'api_keys': list(app.fallback_api_keys.values())})
-    else:
-        return jsonify({'status': 'success', 'api_keys': list(app.fallback_api_keys.values())})
+            pass
+    return jsonify({'status': 'success', 'api_keys': list(app.fallback_api_keys.values())})
 
 @app.route('/admin_revoke', methods=['GET'])
 def admin_revoke():
@@ -558,7 +510,6 @@ def qr_image():
     if not order:
         return jsonify({'status': 'error', 'message': 'Order not found'}), 404
     upi_intent = f"upi://pay?pa={CONFIG['UPI_ID']}&pn=FamPay&tr={order_id}&tn=Payment+for+Order+{order_id}&am={order['amount']}&cu=INR"
-    # Colored QR Code
     qr = qrcode.QRCode(box_size=10, border=4)
     qr.add_data(upi_intent)
     qr.make(fit=True)
@@ -1186,7 +1137,6 @@ def generate_qr_legacy():
     qr = qrcode.QRCode(box_size=10, border=4)
     qr.add_data(upi_intent)
     qr.make(fit=True)
-    # Colored QR
     img = qr.make_image(fill_color="#8b5cf6", back_color="#0a0a1a")
     img_io = BytesIO()
     img.save(img_io, 'PNG')
