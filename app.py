@@ -2,6 +2,7 @@
 UPI Auto-Payment Verifier – Vercel Serverless Edition
 All config from environment with fallback defaults.
 No background threads, on-demand Gmail verification.
+Order ID prefix: Khan_
 """
 
 import os
@@ -28,7 +29,7 @@ CONFIG = {
     'GMAIL_APP_PASSWORD': os.getenv('GMAIL_APP_PASSWORD', 'owjwtlotkfjnsftm'),
     'GMAIL_EMAIL': os.getenv('GMAIL_EMAIL', 'nkg166465@gmail.com'),
     'TIME_WINDOW_MINUTES': int(os.getenv('TIME_WINDOW_MINUTES', 5)),
-    'DB_FILE': os.getenv('DB_FILE', '/tmp/orders.db'),  # Vercel: /tmp writable
+    'DB_FILE': os.getenv('DB_FILE', '/tmp/orders.db'),
     'ADMIN_API_KEY': os.getenv('ADMIN_API_KEY', 'khanbro786'),
     'MAX_EMAILS_CHECK': int(os.getenv('MAX_EMAILS_CHECK', 50)),
     'CACHE_EXPIRE_SECONDS': int(os.getenv('CACHE_EXPIRE_SECONDS', 600)),
@@ -49,45 +50,65 @@ CORS(app)
 # ============================================
 # DATABASE SETUP (in /tmp for Vercel)
 # ============================================
-def init_db():
+def get_db():
     db_path = CONFIG['DB_FILE']
-    conn = sqlite3.connect(db_path)
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS orders (
-            order_id TEXT PRIMARY KEY,
-            api_key TEXT,
-            amount REAL,
-            payable_amount REAL,
-            status TEXT DEFAULT 'pending',
-            utr TEXT,
-            transaction_id TEXT,
-            sender_name TEXT,
-            payment_time TEXT,
-            created_at TEXT,
-            expires_at TEXT,
-            verified_at TEXT,
-            attempts INTEGER DEFAULT 0
-        )
-    ''')
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS api_keys (
-            api_key TEXT PRIMARY KEY,
-            name TEXT,
-            created_at TEXT,
-            expires_at TEXT,
-            is_active INTEGER DEFAULT 1
-        )
-    ''')
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS verified_utrs (
-            utr TEXT PRIMARY KEY,
-            order_id TEXT,
-            verified_at TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
+    db_dir = os.path.dirname(db_path)
+    if db_dir and not os.path.exists(db_dir):
+        os.makedirs(db_dir, exist_ok=True)
+    
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            conn = sqlite3.connect(db_path, timeout=10)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            return conn
+        except sqlite3.OperationalError as e:
+            if attempt == max_retries - 1:
+                raise e
+            time.sleep(0.5)
+
+def init_db():
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS orders (
+                order_id TEXT PRIMARY KEY,
+                api_key TEXT,
+                amount REAL,
+                payable_amount REAL,
+                status TEXT DEFAULT 'pending',
+                utr TEXT,
+                transaction_id TEXT,
+                sender_name TEXT,
+                payment_time TEXT,
+                created_at TEXT,
+                expires_at TEXT,
+                verified_at TEXT,
+                attempts INTEGER DEFAULT 0
+            )
+        ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS api_keys (
+                api_key TEXT PRIMARY KEY,
+                name TEXT,
+                created_at TEXT,
+                expires_at TEXT,
+                is_active INTEGER DEFAULT 1
+            )
+        ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS verified_utrs (
+                utr TEXT PRIMARY KEY,
+                order_id TEXT,
+                verified_at TEXT
+            )
+        ''')
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"DB init error: {e}")
 
 try:
     init_db()
@@ -97,13 +118,8 @@ except Exception as e:
 # ============================================
 # DATABASE HELPERS
 # ============================================
-def get_db():
-    conn = sqlite3.connect(CONFIG['DB_FILE'])
-    conn.row_factory = sqlite3.Row
-    return conn
-
 def create_order(api_key, amount):
-    order_id = f"fg_{secrets.token_hex(4).upper()}"
+    order_id = f"Khan_{secrets.token_hex(4).upper()}"  # Changed prefix
     now = datetime.now().strftime('%d-%m-%Y %H:%M:%S')
     expires = (datetime.now() + timedelta(minutes=CONFIG['TIME_WINDOW_MINUTES'])).strftime('%d-%m-%Y %H:%M:%S')
     conn = get_db()
@@ -1149,9 +1165,9 @@ def index():
             'create_order': f'curl "{base_url}/api/qr.php?api_key=fam_YOUR_KEY&amount=499"',
             'verify_by_amount': f'curl "{base_url}/verify-fast?amount=1"',
             'verify_by_utr': f'curl "{base_url}/verify-fast?utr=006175980105"',
-            'check_order': f'curl "{base_url}/api/verify-order.php?api_key=fam_YOUR_KEY&order_id=fg_PEQ1JTMI"',
+            'check_order': f'curl "{base_url}/api/verify-order.php?api_key=fam_YOUR_KEY&order_id=Khan_PEQ1JTMI"',
             'generate_qr_image': f'curl "{base_url}/generate-qr?amount=499" --output qr.png',
-            'payment_page': f'Open in browser: {base_url}/pay.php?order_id=fg_PEQ1JTMI',
+            'payment_page': f'Open in browser: {base_url}/pay.php?order_id=Khan_PEQ1JTMI',
             'health': f'curl {base_url}/health'
         }
     })
