@@ -1,6 +1,6 @@
 """
 UPI Auto-Payment Verifier – Vercel Serverless Edition
-Complete error handling, safe Supabase/Gmail fallback, premium UI.
+Complete error handling, safe Supabase/Gmail fallback, colorful FamGateway UI.
 """
 
 import os
@@ -68,19 +68,17 @@ CORS(app)
 @app.errorhandler(Exception)
 def handle_exception(e):
     logger.error(f"Unhandled exception: {e}", exc_info=True)
-    # If the request expects JSON, return JSON error
     if request.path.startswith('/api/') or request.path.startswith('/verify-') or request.path.startswith('/admin_'):
         return jsonify({
             'status': 'error',
             'message': 'Internal server error',
             'detail': str(e) if app.debug else None
         }), 500
-    # For HTML pages, return a clean error page
     return render_template_string('''
         <!DOCTYPE html>
         <html>
         <head><title>Error</title>
-        <style>body{font-family:sans-serif;text-align:center;padding:2rem;background:#050816;color:#F8FAFC;}</style>
+        <style>body{font-family:sans-serif;text-align:center;padding:2rem;background:#0B0B1A;color:#F8FAFC;}</style>
         </head>
         <body>
         <h1>⚠️ Something went wrong</h1>
@@ -639,7 +637,7 @@ def qr_image():
         return jsonify({'status': 'error', 'message': 'Failed to generate QR'}), 500
 
 # ============================================
-# PAYMENT PAGE TEMPLATE (FamGateway style, fast auto-check)
+# PAYMENT PAGE TEMPLATE (Colorful FamGateway style, 1-second auto-check)
 # ============================================
 PAYMENT_PAGE_TEMPLATE = '''
 <!DOCTYPE html>
@@ -672,51 +670,70 @@ PAYMENT_PAGE_TEMPLATE = '''
         .orb {
             position: absolute;
             border-radius: 50%;
-            filter: blur(100px);
+            filter: blur(120px);
             will-change: transform;
-            animation: orbFloat 20s ease-in-out infinite alternate;
+            animation: orbFloat 24s ease-in-out infinite alternate;
         }
-        .orb--purple { width: 50vw; height: 50vw; background: #6C2BD9; opacity: 0.12; top: -10%; left: -20%; }
-        .orb--blue   { width: 40vw; height: 40vw; background: #1E90FF; opacity: 0.08; bottom: -10%; right: -10%; animation-delay: -6s; }
+        .orb--purple { width: 60vw; height: 60vw; background: #6C2BD9; opacity: 0.15; top: -15%; left: -10%; }
+        .orb--blue   { width: 50vw; height: 50vw; background: #1E90FF; opacity: 0.10; bottom: -10%; right: -5%; animation-delay: -8s; }
+        .orb--pink   { width: 40vw; height: 40vw; background: #EC4899; opacity: 0.07; top: 40%; left: 50%; animation-delay: -16s; }
         @keyframes orbFloat {
             0% { transform: translate(0, 0) scale(1); }
-            100% { transform: translate(8%, 6%) scale(1.2); }
+            100% { transform: translate(10%, 8%) scale(1.3); }
         }
         .card {
             position: relative;
             z-index: 1;
-            background: rgba(20, 20, 40, 0.65);
-            backdrop-filter: blur(16px);
-            -webkit-backdrop-filter: blur(16px);
+            background: rgba(18, 18, 40, 0.70);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
             border-radius: 28px;
             padding: 32px 28px;
             max-width: 400px;
             width: 100%;
-            border: 1px solid rgba(108, 43, 217, 0.25);
-            box-shadow: 0 20px 60px rgba(0,0,0,0.6), 0 0 40px rgba(108,43,217,0.08);
+            border: 1px solid rgba(108, 43, 217, 0.3);
+            box-shadow: 0 20px 60px rgba(0,0,0,0.6), 0 0 40px rgba(108,43,217,0.12);
             transition: box-shadow 0.3s;
         }
         .card:hover {
-            box-shadow: 0 30px 80px rgba(0,0,0,0.7), 0 0 60px rgba(108,43,217,0.15);
+            box-shadow: 0 30px 80px rgba(0,0,0,0.7), 0 0 60px rgba(108,43,217,0.18);
+        }
+        .card::before {
+            content: '';
+            position: absolute;
+            inset: -2px;
+            border-radius: 30px;
+            padding: 2px;
+            background: linear-gradient(135deg, rgba(139,92,246,0.4), rgba(30,144,255,0.3), rgba(236,72,153,0.2));
+            -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+            -webkit-mask-composite: xor;
+            mask-composite: exclude;
+            pointer-events: none;
+            animation: borderPulse 8s ease-in-out infinite alternate;
+        }
+        @keyframes borderPulse {
+            0% { opacity: 0.4; }
+            100% { opacity: 0.9; }
         }
         .header { text-align: center; margin-bottom: 20px; }
         .brand {
             font-size: 22px;
             font-weight: 700;
             letter-spacing: -0.5px;
-            background: linear-gradient(135deg, #8B5CF6, #4F46E5);
+            background: linear-gradient(135deg, #8B5CF6, #1E90FF);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             background-clip: text;
         }
         .brand span { -webkit-text-fill-color: #F8FAFC; }
+
         .order-total {
-            background: rgba(108, 43, 217, 0.10);
+            background: rgba(108, 43, 217, 0.12);
             border-radius: 18px;
             padding: 16px 12px;
             text-align: center;
             margin-bottom: 24px;
-            border: 1px solid rgba(108, 43, 217, 0.15);
+            border: 1px solid rgba(108, 43, 217, 0.2);
         }
         .order-total .label {
             font-size: 13px;
@@ -728,7 +745,7 @@ PAYMENT_PAGE_TEMPLATE = '''
         .order-total .amount {
             font-size: 36px;
             font-weight: 700;
-            background: linear-gradient(135deg, #8B5CF6, #1E90FF);
+            background: linear-gradient(135deg, #8B5CF6, #1E90FF, #EC4899);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             background-clip: text;
@@ -738,13 +755,14 @@ PAYMENT_PAGE_TEMPLATE = '''
             font-size: 20px;
             -webkit-text-fill-color: #94A3B8;
         }
+
         .qr-section { text-align: center; margin: 16px 0 12px; }
         .qr-wrapper {
             display: inline-block;
             padding: 8px;
             background: white;
             border-radius: 16px;
-            box-shadow: 0 0 30px rgba(108,43,217,0.15);
+            box-shadow: 0 0 40px rgba(108,43,217,0.25);
             transition: box-shadow 0.3s;
         }
         .qr-wrapper img {
@@ -763,17 +781,21 @@ PAYMENT_PAGE_TEMPLATE = '''
         .qr-section .save-btn {
             display: inline-block;
             margin-top: 10px;
-            background: rgba(255,255,255,0.06);
+            background: rgba(255,255,255,0.08);
             color: #E2E8F0;
             padding: 6px 18px;
             border-radius: 30px;
             font-size: 13px;
             font-weight: 500;
             text-decoration: none;
-            border: 1px solid rgba(255,255,255,0.08);
-            transition: background 0.2s;
+            border: 1px solid rgba(255,255,255,0.12);
+            transition: background 0.2s, transform 0.2s;
         }
-        .qr-section .save-btn:hover { background: rgba(255,255,255,0.12); }
+        .qr-section .save-btn:hover {
+            background: rgba(255,255,255,0.15);
+            transform: scale(1.02);
+        }
+
         .details {
             margin: 18px 0;
             border-top: 1px solid rgba(255,255,255,0.06);
@@ -796,8 +818,9 @@ PAYMENT_PAGE_TEMPLATE = '''
         }
         @keyframes textGlow {
             0% { text-shadow: 0 0 10px rgba(108,43,217,0.2); }
-            100% { text-shadow: 0 0 20px rgba(108,43,217,0.4); }
+            100% { text-shadow: 0 0 25px rgba(108,43,217,0.5); }
         }
+
         .status {
             background: rgba(255,255,255,0.04);
             border-radius: 16px;
@@ -810,7 +833,7 @@ PAYMENT_PAGE_TEMPLATE = '''
             align-items: center;
             justify-content: center;
             gap: 10px;
-            border: 1px solid rgba(255,255,255,0.05);
+            border: 1px solid rgba(255,255,255,0.06);
             transition: background 0.4s, border-color 0.4s, color 0.4s;
         }
         .status .spinner {
@@ -823,18 +846,21 @@ PAYMENT_PAGE_TEMPLATE = '''
             animation: spin 1s linear infinite;
         }
         @keyframes spin { to { transform: rotate(360deg); } }
+
         .status.verified {
             background: rgba(34, 197, 94, 0.12);
             border-color: rgba(34, 197, 94, 0.25);
             color: #22C55E;
         }
         .status.verified .spinner { display: none; }
+
         .status.expired {
             background: rgba(248, 113, 113, 0.12);
             border-color: rgba(248, 113, 113, 0.25);
             color: #F87171;
         }
         .status.expired .spinner { display: none; }
+
         .check-link {
             text-align: center;
             margin-top: 10px;
@@ -847,19 +873,21 @@ PAYMENT_PAGE_TEMPLATE = '''
             transition: color 0.2s;
         }
         .check-link a:hover { color: #A78BFA; text-decoration: underline; }
+
         .footer {
             text-align: center;
             margin-top: 18px;
             font-size: 13px;
             color: #475569;
         }
+
         @media (max-width: 480px) {
             .card { padding: 22px 16px; }
             .qr-wrapper img { width: 150px; height: 150px; }
             .order-total .amount { font-size: 30px; }
         }
         @media (prefers-reduced-motion: reduce) {
-            .orb, .glow-text { animation: none !important; }
+            .orb, .card::before, .glow-text { animation: none !important; }
         }
     </style>
 </head>
@@ -867,6 +895,7 @@ PAYMENT_PAGE_TEMPLATE = '''
     <div class="ambient">
         <div class="orb orb--purple"></div>
         <div class="orb orb--blue"></div>
+        <div class="orb orb--pink"></div>
     </div>
     <div class="card">
         <div class="header"><div class="brand">Fam<span>Gateway</span>™</div></div>
@@ -980,7 +1009,7 @@ PAYMENT_PAGE_TEMPLATE = '''
 '''
 
 # ============================================
-# SUCCESS PAGE
+# SUCCESS PAGE (with beautiful popup animation)
 # ============================================
 SUCCESS_PAGE = '''
 <!DOCTYPE html>
@@ -993,7 +1022,7 @@ SUCCESS_PAGE = '''
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #050816;
+            background: #0B0B1A;
             min-height: 100vh;
             display: flex;
             justify-content: center;
@@ -1016,11 +1045,11 @@ SUCCESS_PAGE = '''
             border-radius: 50%;
             filter: blur(120px);
             will-change: transform;
-            animation: orbFloat 18s ease-in-out infinite alternate;
+            animation: orbFloat 20s ease-in-out infinite alternate;
         }
-        .orb--emerald { width: 60vw; height: 60vw; background: #22C55E; opacity: 0.12; top: -5%; left: -15%; animation-duration: 16s; }
-        .orb--violet { width: 50vw; height: 50vw; background: #8B5CF6; opacity: 0.08; bottom: -10%; right: -5%; animation-duration: 20s; animation-delay: -5s; }
-        .orb--cyan { width: 40vw; height: 40vw; background: #06B6D4; opacity: 0.06; top: 30%; left: 50%; animation-duration: 22s; animation-delay: -10s; }
+        .orb--emerald { width: 60vw; height: 60vw; background: #22C55E; opacity: 0.12; top: -5%; left: -15%; }
+        .orb--violet { width: 50vw; height: 50vw; background: #8B5CF6; opacity: 0.08; bottom: -10%; right: -5%; animation-delay: -6s; }
+        .orb--cyan   { width: 40vw; height: 40vw; background: #06B6D4; opacity: 0.06; top: 30%; left: 50%; animation-delay: -12s; }
         @keyframes orbFloat {
             0% { transform: translate(0, 0) scale(1); }
             100% { transform: translate(10%, 8%) scale(1.3); }
@@ -1028,29 +1057,29 @@ SUCCESS_PAGE = '''
         .card {
             position: relative;
             z-index: 1;
-            background: rgba(5, 8, 22, 0.65);
+            background: rgba(18, 18, 40, 0.75);
             backdrop-filter: blur(20px);
             -webkit-backdrop-filter: blur(20px);
-            border-radius: 30px;
+            border-radius: 32px;
             padding: 40px 32px;
             max-width: 440px;
             width: 100%;
-            border: 1px solid rgba(255,255,255,0.06);
-            box-shadow: 0 20px 60px rgba(0,0,0,0.6), 0 0 40px rgba(34,197,94,0.08);
-            animation: popIn 0.7s cubic-bezier(0.34, 1.56, 0.64, 1);
+            border: 1px solid rgba(34,197,94,0.3);
+            box-shadow: 0 20px 60px rgba(0,0,0,0.6), 0 0 50px rgba(34,197,94,0.1);
+            animation: popIn 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
             text-align: center;
         }
         @keyframes popIn {
-            0% { transform: scale(0.9) rotate(-2deg); opacity: 0; }
+            0% { transform: scale(0.8) rotate(-2deg); opacity: 0; }
             100% { transform: scale(1) rotate(0); opacity: 1; }
         }
         .card::before {
             content: '';
             position: absolute;
             inset: -2px;
-            border-radius: 32px;
+            border-radius: 34px;
             padding: 2px;
-            background: linear-gradient(135deg, rgba(34,197,94,0.3), rgba(139,92,246,0.2), rgba(6,182,212,0.2));
+            background: linear-gradient(135deg, rgba(34,197,94,0.4), rgba(139,92,246,0.3), rgba(6,182,212,0.2));
             -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
             -webkit-mask-composite: xor;
             mask-composite: exclude;
@@ -1059,18 +1088,18 @@ SUCCESS_PAGE = '''
         }
         @keyframes borderPulse {
             0% { opacity: 0.4; }
-            100% { opacity: 0.8; }
+            100% { opacity: 0.9; }
         }
         .checkmark {
             width: 100px;
             height: 100px;
-            background: linear-gradient(135deg, #22C55E, #16A34A);
+            background: linear-gradient(135deg, #22C55E, #16A34A, #059669);
             border-radius: 50%;
             display: flex;
             align-items: center;
             justify-content: center;
             margin: 0 auto 20px;
-            box-shadow: 0 0 60px rgba(34,197,94,0.4), 0 0 120px rgba(34,197,94,0.1);
+            box-shadow: 0 0 60px rgba(34,197,94,0.4), 0 0 120px rgba(34,197,94,0.15);
             animation: bounceIn 0.8s ease;
         }
         .checkmark svg {
@@ -1103,7 +1132,11 @@ SUCCESS_PAGE = '''
             margin: 10px 0 6px;
             font-weight: 700;
         }
-        .sub { color: #94A3B8; font-size: 16px; margin-bottom: 24px; }
+        .sub {
+            color: #94A3B8;
+            font-size: 16px;
+            margin-bottom: 24px;
+        }
         .detail-box {
             background: rgba(255,255,255,0.04);
             border-radius: 16px;
@@ -1121,7 +1154,10 @@ SUCCESS_PAGE = '''
         }
         .detail-row:last-child { border: none; }
         .detail-row .label { color: #94A3B8; }
-        .detail-row .value { font-weight: 500; color: #F8FAFC; }
+        .detail-row .value {
+            font-weight: 500;
+            color: #F8FAFC;
+        }
         .btn {
             display: inline-block;
             background: linear-gradient(135deg, #8B5CF6, #6366F1);
@@ -1133,7 +1169,10 @@ SUCCESS_PAGE = '''
             box-shadow: 0 4px 20px rgba(139,92,246,0.3);
             transition: transform 0.2s, box-shadow 0.2s;
         }
-        .btn:hover { transform: scale(1.02); box-shadow: 0 6px 30px rgba(139,92,246,0.5); }
+        .btn:hover {
+            transform: scale(1.03);
+            box-shadow: 0 6px 30px rgba(139,92,246,0.5);
+        }
         .confetti-container {
             position: fixed;
             top: 0; left: 0;
@@ -1218,7 +1257,7 @@ EXPIRED_PAGE = '''
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #050816;
+            background: #0B0B1A;
             display: flex;
             justify-content: center;
             align-items: center;
@@ -1226,7 +1265,7 @@ EXPIRED_PAGE = '''
             padding: 20px;
         }
         .card {
-            background: rgba(255,255,255,0.05);
+            background: rgba(18, 18, 40, 0.70);
             backdrop-filter: blur(20px);
             border-radius: 30px;
             padding: 40px 32px;
@@ -1234,7 +1273,7 @@ EXPIRED_PAGE = '''
             width: 100%;
             text-align: center;
             box-shadow: 0 20px 60px rgba(0,0,0,0.5);
-            border: 1px solid rgba(255,255,255,0.06);
+            border: 1px solid rgba(248,113,113,0.2);
         }
         .icon { font-size: 64px; margin-bottom: 16px; }
         h1 { color: #F87171; font-size: 26px; margin-bottom: 8px; }
@@ -1329,7 +1368,7 @@ def pay_page():
             <!DOCTYPE html>
             <html>
             <head><title>Error</title>
-            <style>body{font-family:sans-serif;text-align:center;padding:2rem;background:#050816;color:#F8FAFC;}</style>
+            <style>body{font-family:sans-serif;text-align:center;padding:2rem;background:#0B0B1A;color:#F8FAFC;}</style>
             </head>
             <body>
             <h1>⚠️ Unable to load payment page</h1>
@@ -1499,7 +1538,7 @@ def index():
                 '/api/qr.php': 'GET - Create order and get QR (api_key, amount)',
                 '/api/verify-order.php': 'GET - Check order status (api_key, order_id)',
                 '/api/qr-image.php': 'GET - Get colored QR image (order_id)',
-                '/pay.php': 'GET - Payment page with FamGateway style (order_id)',
+                '/pay.php': 'GET - Payment page with colorful FamGateway style (order_id)',
                 '/debug-emails': 'GET - Debug'
             }
         },
