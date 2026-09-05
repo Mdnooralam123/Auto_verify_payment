@@ -639,7 +639,7 @@ def qr_image():
         return jsonify({'status': 'error', 'message': 'Failed to generate QR'}), 500
 
 # ============================================
-# PAYMENT PAGE TEMPLATE (valid Jinja2)
+# PAYMENT PAGE TEMPLATE (FamGateway style, fast auto-check)
 # ============================================
 PAYMENT_PAGE_TEMPLATE = '''
 <!DOCTYPE html>
@@ -652,14 +652,13 @@ PAYMENT_PAGE_TEMPLATE = '''
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #050816;
+            background: #0B0B1A;
             min-height: 100vh;
             display: flex;
             justify-content: center;
             align-items: center;
             padding: 20px;
             margin: 0;
-            overflow-x: hidden;
             color: #F8FAFC;
         }
         .ambient {
@@ -673,13 +672,12 @@ PAYMENT_PAGE_TEMPLATE = '''
         .orb {
             position: absolute;
             border-radius: 50%;
-            filter: blur(120px);
+            filter: blur(100px);
             will-change: transform;
-            animation: orbFloat 16s ease-in-out infinite alternate;
+            animation: orbFloat 20s ease-in-out infinite alternate;
         }
-        .orb--violet { width: 60vw; height: 60vw; background: #8B5CF6; opacity: 0.15; top: -10%; left: -20%; animation-duration: 14s; }
-        .orb--cyan { width: 50vw; height: 50vw; background: #06B6D4; opacity: 0.10; bottom: -10%; right: -10%; animation-duration: 18s; animation-delay: -4s; }
-        .orb--pink { width: 40vw; height: 40vw; background: #EC4899; opacity: 0.08; top: 40%; left: 40%; animation-duration: 20s; animation-delay: -8s; }
+        .orb--purple { width: 50vw; height: 50vw; background: #6C2BD9; opacity: 0.12; top: -10%; left: -20%; }
+        .orb--blue   { width: 40vw; height: 40vw; background: #1E90FF; opacity: 0.08; bottom: -10%; right: -10%; animation-delay: -6s; }
         @keyframes orbFloat {
             0% { transform: translate(0, 0) scale(1); }
             100% { transform: translate(8%, 6%) scale(1.2); }
@@ -687,112 +685,125 @@ PAYMENT_PAGE_TEMPLATE = '''
         .card {
             position: relative;
             z-index: 1;
-            background: rgba(5, 8, 22, 0.65);
-            backdrop-filter: blur(20px);
-            -webkit-backdrop-filter: blur(20px);
-            border-radius: 30px;
+            background: rgba(20, 20, 40, 0.65);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border-radius: 28px;
             padding: 32px 28px;
-            max-width: 420px;
+            max-width: 400px;
             width: 100%;
-            border: 1px solid rgba(255,255,255,0.06);
-            box-shadow: 0 20px 60px rgba(0,0,0,0.6), 0 0 40px rgba(139,92,246,0.08);
-            transition: box-shadow 0.4s ease, transform 0.3s ease;
+            border: 1px solid rgba(108, 43, 217, 0.25);
+            box-shadow: 0 20px 60px rgba(0,0,0,0.6), 0 0 40px rgba(108,43,217,0.08);
+            transition: box-shadow 0.3s;
         }
         .card:hover {
-            box-shadow: 0 30px 80px rgba(0,0,0,0.7), 0 0 60px rgba(139,92,246,0.12);
-            transform: translateY(-2px);
+            box-shadow: 0 30px 80px rgba(0,0,0,0.7), 0 0 60px rgba(108,43,217,0.15);
         }
-        .card::before {
-            content: '';
-            position: absolute;
-            inset: -2px;
-            border-radius: 32px;
-            padding: 2px;
-            background: linear-gradient(135deg, rgba(139,92,246,0.3), rgba(6,182,212,0.2), rgba(236,72,153,0.2));
-            -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-            -webkit-mask-composite: xor;
-            mask-composite: exclude;
-            pointer-events: none;
-            animation: borderPulse 8s ease-in-out infinite alternate;
-        }
-        @keyframes borderPulse {
-            0% { opacity: 0.4; }
-            100% { opacity: 0.8; }
-        }
-        .header { text-align: center; margin-bottom: 22px; }
+        .header { text-align: center; margin-bottom: 20px; }
         .brand {
             font-size: 22px;
             font-weight: 700;
             letter-spacing: -0.5px;
-            background: linear-gradient(135deg, #8B5CF6, #06B6D4, #EC4899);
+            background: linear-gradient(135deg, #8B5CF6, #4F46E5);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             background-clip: text;
         }
+        .brand span { -webkit-text-fill-color: #F8FAFC; }
         .order-total {
-            background: rgba(139,92,246,0.08);
-            border-radius: 20px;
-            padding: 18px 16px;
+            background: rgba(108, 43, 217, 0.10);
+            border-radius: 18px;
+            padding: 16px 12px;
             text-align: center;
             margin-bottom: 24px;
-            border: 1px solid rgba(139,92,246,0.15);
+            border: 1px solid rgba(108, 43, 217, 0.15);
         }
-        .order-total .label { font-size: 13px; color: #94A3B8; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 500; }
+        .order-total .label {
+            font-size: 13px;
+            color: #94A3B8;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-weight: 500;
+        }
         .order-total .amount {
-            font-size: 38px;
+            font-size: 36px;
             font-weight: 700;
-            background: linear-gradient(135deg, #8B5CF6 0%, #06B6D4 50%, #EC4899 100%);
+            background: linear-gradient(135deg, #8B5CF6, #1E90FF);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             background-clip: text;
             margin-top: 2px;
         }
-        .order-total .currency { font-size: 20px; -webkit-text-fill-color: #94A3B8; }
-        .qr-section { text-align: center; margin: 20px 0 16px; }
+        .order-total .currency {
+            font-size: 20px;
+            -webkit-text-fill-color: #94A3B8;
+        }
+        .qr-section { text-align: center; margin: 16px 0 12px; }
         .qr-wrapper {
             display: inline-block;
             padding: 8px;
             background: white;
-            border-radius: 18px;
-            box-shadow: 0 0 30px rgba(139,92,246,0.15), 0 0 60px rgba(6,182,212,0.08);
-            animation: qrGlow 4s ease-in-out infinite alternate;
+            border-radius: 16px;
+            box-shadow: 0 0 30px rgba(108,43,217,0.15);
+            transition: box-shadow 0.3s;
         }
-        @keyframes qrGlow {
-            0% { box-shadow: 0 0 20px rgba(139,92,246,0.15), 0 0 40px rgba(6,182,212,0.05); }
-            100% { box-shadow: 0 0 40px rgba(139,92,246,0.30), 0 0 80px rgba(6,182,212,0.12); }
+        .qr-wrapper img {
+            display: block;
+            width: 180px;
+            height: 180px;
+            border-radius: 10px;
+            background: white;
         }
-        .qr-wrapper img { display: block; width: 200px; height: 200px; border-radius: 12px; background: white; }
-        .qr-section .sub { font-size: 14px; color: #94A3B8; margin-top: 10px; }
+        .qr-section .sub {
+            font-size: 14px;
+            color: #94A3B8;
+            margin-top: 10px;
+            font-weight: 500;
+        }
         .qr-section .save-btn {
             display: inline-block;
-            margin-top: 12px;
+            margin-top: 10px;
             background: rgba(255,255,255,0.06);
             color: #E2E8F0;
-            padding: 8px 22px;
+            padding: 6px 18px;
             border-radius: 30px;
-            font-size: 14px;
+            font-size: 13px;
             font-weight: 500;
             text-decoration: none;
             border: 1px solid rgba(255,255,255,0.08);
-            transition: background 0.2s, transform 0.2s;
+            transition: background 0.2s;
         }
-        .qr-section .save-btn:hover { background: rgba(255,255,255,0.12); transform: scale(1.02); }
-        .details { margin: 20px 0; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 18px; }
-        .detail-row { display: flex; justify-content: space-between; padding: 8px 0; font-size: 15px; }
+        .qr-section .save-btn:hover { background: rgba(255,255,255,0.12); }
+        .details {
+            margin: 18px 0;
+            border-top: 1px solid rgba(255,255,255,0.06);
+            padding-top: 16px;
+        }
+        .detail-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 6px 0;
+            font-size: 15px;
+        }
         .detail-row .label { color: #94A3B8; }
-        .detail-row .value { font-weight: 500; color: #F8FAFC; }
+        .detail-row .value {
+            font-weight: 500;
+            color: #F8FAFC;
+        }
         .timer-warning { color: #F87171; font-weight: 600; }
-        .glow-text { animation: textGlow 3s ease-in-out infinite alternate; }
+        .glow-text {
+            animation: textGlow 3s ease-in-out infinite alternate;
+        }
         @keyframes textGlow {
-            0% { text-shadow: 0 0 20px rgba(139,92,246,0.15); }
-            100% { text-shadow: 0 0 40px rgba(139,92,246,0.35); }
+            0% { text-shadow: 0 0 10px rgba(108,43,217,0.2); }
+            100% { text-shadow: 0 0 20px rgba(108,43,217,0.4); }
         }
         .status {
             background: rgba(255,255,255,0.04);
             border-radius: 16px;
-            padding: 16px;
+            padding: 14px;
             text-align: center;
-            margin: 16px 0;
+            margin: 14px 0;
             font-size: 15px;
             font-weight: 500;
             display: flex;
@@ -800,63 +811,103 @@ PAYMENT_PAGE_TEMPLATE = '''
             justify-content: center;
             gap: 10px;
             border: 1px solid rgba(255,255,255,0.05);
-            transition: background 0.5s, border-color 0.5s, color 0.5s;
+            transition: background 0.4s, border-color 0.4s, color 0.4s;
         }
         .status .spinner {
             display: inline-block;
-            width: 20px;
-            height: 20px;
-            border: 3px solid rgba(139,92,246,0.2);
+            width: 18px;
+            height: 18px;
+            border: 3px solid rgba(108,43,217,0.2);
             border-top-color: #8B5CF6;
             border-radius: 50%;
             animation: spin 1s linear infinite;
         }
         @keyframes spin { to { transform: rotate(360deg); } }
-        .status.verified { background: rgba(34, 197, 94, 0.12); border-color: rgba(34, 197, 94, 0.25); color: #22C55E; }
+        .status.verified {
+            background: rgba(34, 197, 94, 0.12);
+            border-color: rgba(34, 197, 94, 0.25);
+            color: #22C55E;
+        }
         .status.verified .spinner { display: none; }
-        .status.expired { background: rgba(248, 113, 113, 0.12); border-color: rgba(248, 113, 113, 0.25); color: #F87171; }
+        .status.expired {
+            background: rgba(248, 113, 113, 0.12);
+            border-color: rgba(248, 113, 113, 0.25);
+            color: #F87171;
+        }
         .status.expired .spinner { display: none; }
-        .check-link { text-align: center; margin-top: 12px; font-size: 14px; }
-        .check-link a { color: #8B5CF6; text-decoration: none; font-weight: 500; transition: color 0.2s; }
+        .check-link {
+            text-align: center;
+            margin-top: 10px;
+            font-size: 14px;
+        }
+        .check-link a {
+            color: #8B5CF6;
+            text-decoration: none;
+            font-weight: 500;
+            transition: color 0.2s;
+        }
         .check-link a:hover { color: #A78BFA; text-decoration: underline; }
-        .footer { text-align: center; margin-top: 20px; font-size: 13px; color: #475569; }
+        .footer {
+            text-align: center;
+            margin-top: 18px;
+            font-size: 13px;
+            color: #475569;
+        }
         @media (max-width: 480px) {
-            .card { padding: 22px 18px; }
-            .qr-wrapper img { width: 160px; height: 160px; }
-            .order-total .amount { font-size: 32px; }
+            .card { padding: 22px 16px; }
+            .qr-wrapper img { width: 150px; height: 150px; }
+            .order-total .amount { font-size: 30px; }
         }
         @media (prefers-reduced-motion: reduce) {
-            .orb, .card::before, .qr-wrapper, .glow-text { animation: none !important; }
-            .card:hover { transform: none !important; }
+            .orb, .glow-text { animation: none !important; }
         }
     </style>
 </head>
 <body>
     <div class="ambient">
-        <div class="orb orb--violet"></div>
-        <div class="orb orb--cyan"></div>
-        <div class="orb orb--pink"></div>
+        <div class="orb orb--purple"></div>
+        <div class="orb orb--blue"></div>
     </div>
     <div class="card">
-        <div class="header"><div class="brand">Fam<span style="-webkit-text-fill-color: white;">Gateway</span>™</div></div>
+        <div class="header"><div class="brand">Fam<span>Gateway</span>™</div></div>
+
         <div class="order-total">
             <div class="label">ORDER TOTAL</div>
             <div class="amount">₹ {{ amount }} <span class="currency">INR</span></div>
         </div>
+
         <div class="qr-section">
             <div class="qr-wrapper"><img id="qr-img" src="{{ qr_url }}" alt="QR Code"></div>
             <div class="sub">SCAN WITH ANY UPI APP</div>
             <a href="{{ qr_url }}" download="qr_{{ order_id }}.png" class="save-btn">🔗 Save QR</a>
         </div>
+
         <div class="details">
-            <div class="detail-row"><span class="label">Merchant</span><span class="value">{{ merchant }}</span></div>
-            <div class="detail-row"><span class="label">Order ID</span><span class="value">{{ order_id }}</span></div>
-            <div class="detail-row"><span class="label">Expires In</span><span class="value glow-text" id="timer">--:--</span></div>
+            <div class="detail-row">
+                <span class="label">Merchant</span>
+                <span class="value">{{ merchant }}</span>
+            </div>
+            <div class="detail-row">
+                <span class="label">Order ID</span>
+                <span class="value">{{ order_id }}</span>
+            </div>
+            <div class="detail-row">
+                <span class="label">Expires In</span>
+                <span class="value glow-text" id="timer">--:--</span>
+            </div>
         </div>
-        <div class="status" id="status"><span class="spinner"></span><span id="status-text">Waiting for payment…</span></div>
-        <div class="check-link"><a href="{{ verify_url }}" target="_blank">Check Status</a></div>
+
+        <div class="status" id="status">
+            <span class="spinner"></span>
+            <span id="status-text">Waiting for payment…</span>
+        </div>
+
+        <div class="check-link">
+            <a href="{{ verify_url }}" target="_blank">Check Status</a>
+        </div>
         <div class="footer">⚡ Auto‑verified instantly after UPI payment</div>
     </div>
+
     <script>
         var expiresStr = "{{ expires_at }}";
         var datePart, timePart, dd, mm, yyyy, hh, min, sec;
@@ -873,7 +924,6 @@ PAYMENT_PAGE_TEMPLATE = '''
             min = parseInt(timeParts[1], 10);
             sec = parseInt(timeParts[2], 10);
         } else {
-            // fallback: 5 minutes from now
             var now = new Date();
             now.setMinutes(now.getMinutes() + 5);
             yyyy = now.getFullYear();
@@ -901,6 +951,7 @@ PAYMENT_PAGE_TEMPLATE = '''
         }
         updateTimer();
         setInterval(updateTimer, 1000);
+
         var statusEl = document.getElementById('status');
         var statusText = document.getElementById('status-text');
         var verifyUrl = "{{ verify_url }}";
@@ -920,7 +971,8 @@ PAYMENT_PAGE_TEMPLATE = '''
                 })
                 .catch(function() {});
         }
-        setInterval(checkStatus, 3000);
+        // Check every 1 second for ultra‑fast verification
+        setInterval(checkStatus, 1000);
         checkStatus();
     </script>
 </body>
@@ -1447,7 +1499,7 @@ def index():
                 '/api/qr.php': 'GET - Create order and get QR (api_key, amount)',
                 '/api/verify-order.php': 'GET - Check order status (api_key, order_id)',
                 '/api/qr-image.php': 'GET - Get colored QR image (order_id)',
-                '/pay.php': 'GET - Payment page with neon-glow UI (order_id)',
+                '/pay.php': 'GET - Payment page with FamGateway style (order_id)',
                 '/debug-emails': 'GET - Debug'
             }
         },
